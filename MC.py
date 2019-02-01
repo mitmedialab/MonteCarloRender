@@ -215,6 +215,7 @@ def lunchPacketwithBatch(batchSize = 1000,
     num_simulated = 0
     
     while num_simulated < nPhotonsToRun and num_detected < nPhotonsRequested:
+        print('{:.0e}'.format(num_simulated), end="\r")
         ret = lunchBatch(batchSize = batchSize,
                          muS = muS, g = g,
                        source = source,

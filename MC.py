@@ -29,6 +29,7 @@ def lunchBatch(batchSize = 1000,
                max_distance_from_det = 1000.0,
                ret_cols = [1,2,7,8]):
     
+    
     # Assume all photons start the same (impulse pencil)
     r0 = source['r']
     nu0 = source['mu']
@@ -40,21 +41,22 @@ def lunchBatch(batchSize = 1000,
     data = np.array(data)
     
 #    THIS IS A NON_PARALLEL HISTORIC VERSION
-#     data = np.zeros(shape=(batchSize, ncol), dtype=float)
+#     data = np.zeros(shape=(batchSize, len(ret_cols)), dtype=float)
 #     for i in range(batchSize):
 #        #r0, nu0, d0, n0 = simSource(source)
 #        r0 = source['r']
 #        nu0 = source['mu']
 #        d0 = 0.0
 #        n0 = 0        
-#        ret = propPhoton(muS = muS, g = g,
+#        data[i, :] = propPhoton(muS = muS, g = g,
 #                       r0  = r0,
 #                       nu0 = nu0,
 #                       d0 = d0, n0 = n0,
 #                       detR = detR,
 #                       max_N = max_N,
-#                       max_distance_from_det = max_distance_from_det)
-#        data[i, :] = [ret[1], ret[2], ret[7], ret[8]]
+#                       max_distance_from_det = max_distance_from_det,
+#                       ret_cols=ret_cols )
+
     
     return data
 
@@ -70,7 +72,7 @@ def propPhoton(muS  =  1.0, g = 0.85,
                max_N = 1e5,
                max_distance_from_det = 1000.0,
                ret_cols = [1,2,7,8]):
-    
+    np.random.seed()
     r =  r0.copy()
     nu = nu0.copy()
     d = d0

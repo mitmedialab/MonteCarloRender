@@ -34,6 +34,7 @@ def testBatch():
     with open('testdata.pickle', 'wb') as handle:
         pickle.dump(ds, handle)   
     np.save('testdata.npy', ret[0])
+    return ret
 
 
 
@@ -51,6 +52,7 @@ def testPacket():
                    ret_cols = [1,2,7,8]
                    )
     print(ret)
+    return ret
 
 def testPhoton():
     ret = MC.propPhoton(muS  =  1.0, g = 0.85,
@@ -60,10 +62,10 @@ def testPhoton():
                   detR = 10.0,
                   max_N = 1e5,
                   max_distance_from_det = 1000.0,
-                  max_trials = 100,
                    ret_cols = [1,2,7,8]
                     )
     print(ret)
+    return ret
    
 
 

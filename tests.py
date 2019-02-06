@@ -14,9 +14,9 @@ import MC
 
 def testBatch():
     t1 = time.perf_counter()
-    ret = MC.lunchPacketwithBatch(batchSize = 2000,
-                               nPhotonsRequested = 4000,
-                                nPhotonsToRun = 4000,
+    ret = MC.lunchPacketwithBatch(batchSize = 1e7,
+                               nPhotonsRequested = 1e7,
+                                nPhotonsToRun = 1e7,
                                 muS = 1.0, g = 0.85,
                                 source = {'r': np.array([0.0, 0.0, 30.0]),
                                           'mu': np.array([0.0, 0.0, -1.0]),
@@ -25,7 +25,7 @@ def testBatch():
                                 control_param = {'max_N': 1e5,
                                                  'max_distance_from_det': 110},
                                 normalize_d = None,
-                                ret_cols = [0,1,2,3,4,5,6,7,8]
+                                ret_cols = [0,1,2,3]
                                 )
     print(ret[1], ret[2], time.perf_counter()-t1)
     ds = {'data': ret[0],
@@ -49,7 +49,7 @@ def testPacket():
                    control_param = {'max_N': 1e5,
                                     'max_distance_from_det': 1000},
                    normalize_d = None,
-                   ret_cols = [1,2,7,8]
+                   ret_cols = [0,1,2,3]
                    )
     print(ret)
     return ret
@@ -62,7 +62,7 @@ def testPhoton():
                   detR = 10.0,
                   max_N = 1e5,
                   max_distance_from_det = 1000.0,
-                   ret_cols = [1,2,7,8]
+                   ret_cols = [0,1,2,3]
                     )
     print(ret)
     return ret

@@ -33,7 +33,7 @@ def lunchPacketwithBatch(batchSize = 1000,
                         ret_cols = [0,1,2,3],
                         target = {'type':0,
                                   'mask':np.zeros(shape=(60,60)),
-                                  'grid_size':[1,1],
+                                  'grid_size':np.array([1,1]),
                                   'z_target':20}
                         ):
     muS = float(muS)

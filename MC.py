@@ -44,7 +44,7 @@ def lunchPacketwithBatch(batchSize = 1000,
     
     nPhotonsRequested = int(nPhotonsRequested)
     batchSize = int(batchSize)
-    data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)),dtype=float)
+    data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)), dtype=float)
     
     num_detected = 0
     num_simulated = 0

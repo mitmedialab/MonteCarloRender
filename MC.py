@@ -44,7 +44,7 @@ def lunchPacketwithBatch(batchSize = 1000,
     
     nPhotonsRequested = int(nPhotonsRequested)
     batchSize = int(batchSize)
-    data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)))
+    data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)),dtype=float)
     
     num_detected = 0
     num_simulated = 0
@@ -96,7 +96,6 @@ def lunchBatchGPU(batchSize = 1000,
     
     target_type = target['type']
     target_mask = target['mask']
-    target_dim = np.array([target['mask'].shape[1],target['mask'].shape[0]]).astype(float)
     target_gridsize = target['grid_size'].astype(float)
     z_target = target['z_target']
 
@@ -129,6 +128,8 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]
     target_y_dim = target_mask.shape[0]
+    x_center_index = target_x_dim / 2
+    y_center_index = target_y_dim / 2
 
     for photon_ind in range(photons_per_thread):
         # NOTE: All photons in the thread start exactly the same!
@@ -178,17 +179,17 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
                     data_out[thread_id, photon_ind, :] = -1.0
                     break
             
-            if target_type == 1:
-                if (t_rz-z_target)*(z-z_target)<=0: #we passed the target plane. See if we hit target
-                    cd_target = -(z-z_target)/nuz
-                    x = x + cd * nux
-                    y = y + cd * nuy
-                    x_index = int(math.floor(x/target_gridsize[0])+target_x_dim/2) #center of camera at x=0
-                    y_index = int(math.floor(y/target_gridsize[1])+target_y_dim/2) #canter of cameta at y=0
-                    if x_index < 0 or x_index>=target_x_dim or y_index<0 or y_index>=target_y_dim:
+            if target_type == 1: #if target is simulated
+                if (t_rz - z_target) * (z - z_target) <=0 : #we passed the target plane. See if we hit target
+                    cd_target = (z_target - z) / nuz
+                    x = x + cd_target * nux #this x is temporally, if simulation resumed, updated by tr_x immidiately
+                    y = y + cd_target * nuy
+                    x_index = int(math.floor(x / target_gridsize[0]) + x_center_index) #center of camera at x=0
+                    y_index = int(math.floor(y / target_gridsize[1]) + y_center_index) #canter of cameta at y=0
+                    if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
                         data_out[thread_id, photon_ind, :] = -4.0 #photon is out of the bound of target
                         break
-                    elif target_mask[y_index,x_index] == 0:
+                    elif target_mask[x_index,y_index] == 0:
                         data_out[thread_id, photon_ind, :] = -5.0 #we are absorbed by target
                         break
 

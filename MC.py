@@ -140,6 +140,10 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_param
     target_y_dim = target_mask.shape[0]
     x_center_index = target_x_dim / 2
     y_center_index = target_y_dim / 2
+    
+    if source_param[0] == 1:
+        rand_nx = xoroshiro128p_uniform_float32(rng_states, thread_id) 
+        rand_ny = xoroshiro128p_uniform_float32(rng_states, thread_id) 
 
     for photon_ind in range(photons_per_thread):
         # NOTE: All photons in the thread start exactly the same!
@@ -149,6 +153,15 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_param
             d = source_param[7]
             n = source_param[8]
             z_start = source_param[3]
+        elif source_param[0] == 1: 
+            x, y, z = source_param[1], source_param[2], source_param[3]
+            #generate random angle between -theta/2 and theta/2 (param[7]), and add it to the original angle
+            nu_x = source_param[4] + math.sin(source_param[7] * (rand_nx - 0.5)) 
+            nu_y = source_param[5] + math.sin(source_param[7] * (rand_ny - 0.5)) 
+            nu_mag = math.sqrt(nu_x**2 + nu_y**2 + 1)
+            nu_x = nu_x/nu_mag
+            nu_y = nu_y/nu_mag
+            nu_z = source_param[6]/nu_mag
 
         detR2 = detR**2
         while True:
@@ -246,16 +259,6 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_param
             if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
                 data_out[thread_id, photon_ind, :] = -3.0
                 break
-
-        
-    
-
-
-
-
-
-
-
 
 
 def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),

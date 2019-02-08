@@ -30,7 +30,11 @@ def lunchPacketwithBatch(batchSize = 1000,
                         control_param = {'max_N': 1e5,
                                          'max_distance_from_det': 1000},
                         normalize_d = None,
-                        ret_cols = [0,1,2,3]
+                        ret_cols = [0,1,2,3],
+                        target = {'type':0,
+                                  'mask':np.zeros(shape=(60,60)),
+                                  'grid_size':np.array([1,1]),
+                                  'z_target':20}
                         ):
     muS = float(muS)
     g = float(g)
@@ -52,7 +56,7 @@ def lunchPacketwithBatch(batchSize = 1000,
                        source = source,
                        detR = detR,
                        max_N = max_N,
-                       max_distance_from_det = max_distance_from_det, ret_cols=ret_cols)
+                       max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target)
         # Not valid photons return with n=-1 - so remove them
         ret = ret[ret[:, 0]>=0, :]
         if ret.shape[0] > nPhotonsRequested - num_detected:
@@ -75,7 +79,11 @@ def lunchBatchGPU(batchSize = 1000,
                detR = 1.0,
                max_N = 1e5,
                max_distance_from_det = 1000.0,
-               ret_cols = [0,1,2,3]):
+               ret_cols = [0,1,2,3],
+               target = {'type':0,
+                         'mask':np.zeros(shape=(60,60)),
+                         'grid_size':np.array([1,1]),
+                         'z_target':20}):
     
     
     # Assume all photons start the same (impulse pencil)
@@ -86,6 +94,12 @@ def lunchBatchGPU(batchSize = 1000,
     muS = float(muS)
     g = float(g)
     
+    target_type = target['type']
+    target_mask = target['mask']
+    target_gridsize = target['grid_size'].astype(float)
+    z_target = target['z_target']
+
+    
     threads_per_block = 256 
     blocks = 64
     photons_per_thread = int(np.ceil(float(batchSize)/(threads_per_block * blocks)))
@@ -95,7 +109,7 @@ def lunchBatchGPU(batchSize = 1000,
     data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
     rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det)
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target)
         
     data = data_out.copy_to_host()
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
@@ -109,16 +123,20 @@ def lunchBatchGPU(batchSize = 1000,
 #    0  1  2  3  4    5    6      7   8, 9, 10
 #    n, d, x ,y, z, mu_x, mu_y, mu_z, reserved 
 @cuda.jit
-def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det):
+def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target):
     
     thread_id = cuda.grid(1)
+    target_x_dim = target_mask.shape[1]
+    target_y_dim = target_mask.shape[0]
+    x_center_index = target_x_dim / 2
+    y_center_index = target_y_dim / 2
 
     for photon_ind in range(photons_per_thread):
         # NOTE: All photons in the thread start exactly the same!
         x, y, z =  r0[0], r0[1], r0[2]
         nux, nuy, nuz = nu0[0], nu0[1], nu0[2]
         d = d0
-        n = n0        
+        n = n0
 
         detR2 = detR**2
         while True:
@@ -160,6 +178,20 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
                 else:  # if we passed the detector and didn't hit it we should stop
                     data_out[thread_id, photon_ind, :] = -1.0
                     break
+            
+            if target_type == 1: #if target is simulated
+                if (t_rz - z_target) * (z - z_target) <=0 : #we passed the target plane. See if we hit target
+                    cd_target = (z_target - z) / nuz
+                    x = x + cd_target * nux #this x is temporally, if simulation resumed, updated by tr_x immidiately
+                    y = y + cd_target * nuy
+                    x_index = int(math.floor(x / target_gridsize[0]) + x_center_index) #center of camera at x=0
+                    y_index = int(math.floor(y / target_gridsize[1]) + y_center_index) #canter of cameta at y=0
+                    if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
+                        data_out[thread_id, photon_ind, :] = -4.0 #photon is out of the bound of target
+                        break
+                    elif target_mask[x_index,y_index] == 0:
+                        data_out[thread_id, photon_ind, :] = -5.0 #we are absorbed by target
+                        break
 
             # Update photon
             x, y, z = t_rx, t_ry, t_rz 

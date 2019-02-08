@@ -88,21 +88,12 @@ def lunchBatchGPU(batchSize = 1000,
                          'z_target':20},
                start_from_media_z_boundary = False
             ):
-    # Assume all photons start the same (impulse pencil)
-    r0 = source['r'].astype(float)
-    nu0 = source['mu'].astype(float)
-    if source['method'] == 'pencil':
-        #[type, r[0:2], nu[0:2], d, n]
-        source_param = np.array([0, r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], 0.0, 0]).astype(float) 
-    elif source['method'] == 'cone':
-        source_param = np.array([0])
-    else:
-        sys.exit("Source method is not supported")
+    
     
     muS = float(muS)
     g = float(g)
     
-    
+    source_type, source_param1, source_param2 = simSource(source = source)
         
     target_type = target['type']
     target_mask = target['mask']
@@ -119,7 +110,7 @@ def lunchBatchGPU(batchSize = 1000,
     data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
     rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_param, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,start_from_media_z_boundary)
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,start_from_media_z_boundary)
         
     data = data_out.copy_to_host()
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
@@ -133,7 +124,7 @@ def lunchBatchGPU(batchSize = 1000,
 #    0  1  2  3  4    5    6      7   8, 9, 10
 #    n, d, x ,y, z, mu_x, mu_y, mu_z, reserved 
 @cuda.jit
-def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_param, detR, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,start_from_media_z_boundary):
+def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detR, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,start_from_media_z_boundary):
     
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]
@@ -141,27 +132,39 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_param
     x_center_index = target_x_dim / 2
     y_center_index = target_y_dim / 2
     
-    if source_param[0] == 1:
-        rand_nx = xoroshiro128p_uniform_float32(rng_states, thread_id) 
-        rand_ny = xoroshiro128p_uniform_float32(rng_states, thread_id) 
+    if source_type == 1:
+        rand_theta = xoroshiro128p_uniform_float32(rng_states, thread_id)
+        rand_psi = xoroshiro128p_uniform_float32(rng_states, thread_id)
 
     for photon_ind in range(photons_per_thread):
-        # NOTE: All photons in the thread start exactly the same!
-        if source_param[0] == 0:
-            x, y, z =  source_param[1], source_param[2], source_param[3]
-            nux, nuy, nuz = source_param[4], source_param[5], source_param[6]
-            d = source_param[7]
-            n = source_param[8]
-            z_start = source_param[3]
-        elif source_param[0] == 1: 
-            x, y, z = source_param[1], source_param[2], source_param[3]
-            #generate random angle between -theta/2 and theta/2 (param[7]), and add it to the original angle
-            nu_x = source_param[4] + math.sin(source_param[7] * (rand_nx - 0.5)) 
-            nu_y = source_param[5] + math.sin(source_param[7] * (rand_ny - 0.5)) 
-            nu_mag = math.sqrt(nu_x**2 + nu_y**2 + 1)
-            nu_x = nu_x/nu_mag
-            nu_y = nu_y/nu_mag
-            nu_z = source_param[6]/nu_mag
+        # Initiate photons based on the illumination type
+        #determine x,y,z
+        if source_type == 0:
+            x, y, z, z_start =  source_param1[0], source_param1[1], source_param1[2], source_param1[2]
+            nux, nuy, nuz = source_param1[3], source_param1[4], source_param1[5]
+            d, n = source_param1[6], source_param1[7]
+        elif source_type == 1: 
+            x, y, z, z_start =  source_param1[0], source_param1[1], source_param1[2], source_param1[2]
+            theta =source_param1[6]*(rand_theta-0.5) #theta is angle change of optical axis
+            psi = 2*math.pi*rand_psi
+            mu = math.cos(theta)
+            sqrt_mu = math.sin(theta)
+            sin_psi = math.sin(psi)
+            cos_psi = math.cos(psi)
+            sqrt_w  = math.sqrt(1-source_param1[5]**2)
+            if source_param1[5] == 1.0:
+                nux = sqrt_mu*cos_psi
+                nuy = sqrt_mu*sin_psi
+                nuz = mu 
+            elif source_param1[5] == -1.0:
+                nux = sqrt_mu*cos_psi
+                nuy = -sqrt_mu*sin_psi
+                nuz = -mu
+            elif sqrt_w != 0:
+                nux = source_param1[3]*mu +(source_param1[3]*source_param1[5]*cos_psi - source_param1[4]*sin_psi)*sqrt_mu/sqrt_w
+                nuy = source_param1[4]*mu +(source_param1[4]*source_param1[5]*cos_psi + source_param1[3]*sin_psi)*sqrt_mu/sqrt_w
+                nuz = source_param1[5]*mu - cos_psi*sqrt_mu*sqrt_w
+            d, n = source_param1[7],source_param1[8]
 
         detR2 = detR**2
         while True:
@@ -265,15 +268,23 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
                        'mu': np.array([0.0, 0.0, 1.0]),
                        'method': 'pencil', 
                        'time_profile': 'delta'}):
-        
+    r0 = source['r']
+    nu0 = source['mu']
     if source['method'] == 'pencil':
-        r0 = source['r']
-        mu0 = source['mu']
-        if source['time_profile'] == 'delta':
-            t0 = 0.0
-            n0 = 0
+        source_type = 0
+        #[r[0:2], nu[0:2], d, n]
+        source_param1 = np.array([r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], 0.0, 0]).astype(float)
+        source_param2 = np.array([0]).astype(float)
+    elif source['method'] == 'cone':
+        source_type = 1
+        theta = source['theta']
+        #[r[0:2], nu[0:2],theta d, n]
+        source_param1 = np.array([r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], theta, 0.0, 0]).astype(float)
+        source_param2 = np.array([0]).astype(float)
+    else:
+        sys.exit("Source type is not supported")
             
-    return r0, nu0, d0, n0
+    return source_type, source_param1, source_param2
 
 
 

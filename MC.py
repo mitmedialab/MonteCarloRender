@@ -34,7 +34,8 @@ def lunchPacketwithBatch(batchSize = 1000,
                         target = {'type':0,
                                   'mask':np.zeros(shape=(60,60)),
                                   'grid_size':np.array([1,1]),
-                                  'z_target':20}
+                                  'z_target':20},
+                        start_from_media_z_boundary = False
                         ):
     muS = float(muS)
     g = float(g)
@@ -56,7 +57,8 @@ def lunchPacketwithBatch(batchSize = 1000,
                        source = source,
                        detR = detR,
                        max_N = max_N,
-                       max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target)
+                       max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target,
+                       start_from_media_z_boundary=start_from_media_z_boundary)
         # Not valid photons return with n=-1 - so remove them
         ret = ret[ret[:, 0]>=0, :]
         if ret.shape[0] > nPhotonsRequested - num_detected:
@@ -83,17 +85,25 @@ def lunchBatchGPU(batchSize = 1000,
                target = {'type':0,
                          'mask':np.zeros(shape=(60,60)),
                          'grid_size':np.array([1,1]),
-                         'z_target':20}):
-    
-    
+                         'z_target':20},
+               start_from_media_z_boundary = False
+            ):
     # Assume all photons start the same (impulse pencil)
     r0 = source['r'].astype(float)
     nu0 = source['mu'].astype(float)
-    d0 = 0.0
-    n0 = 0        
+    if source['method'] == 'pencil':
+        #[type, r[0:2], nu[0:2], d, n]
+        source_param = np.array([0, r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], 0.0, 0]).astype(float) 
+    elif source['method'] == 'cone':
+        source_param = np.array([0])
+    else:
+        sys.exit("Source method is not supported")
+    
     muS = float(muS)
     g = float(g)
     
+    
+        
     target_type = target['type']
     target_mask = target['mask']
     target_gridsize = target['grid_size'].astype(float)
@@ -109,7 +119,7 @@ def lunchBatchGPU(batchSize = 1000,
     data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
     rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target)
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_param, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,start_from_media_z_boundary)
         
     data = data_out.copy_to_host()
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
@@ -123,7 +133,7 @@ def lunchBatchGPU(batchSize = 1000,
 #    0  1  2  3  4    5    6      7   8, 9, 10
 #    n, d, x ,y, z, mu_x, mu_y, mu_z, reserved 
 @cuda.jit
-def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target):
+def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_param, detR, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,start_from_media_z_boundary):
     
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]
@@ -133,10 +143,12 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
 
     for photon_ind in range(photons_per_thread):
         # NOTE: All photons in the thread start exactly the same!
-        x, y, z =  r0[0], r0[1], r0[2]
-        nux, nuy, nuz = nu0[0], nu0[1], nu0[2]
-        d = d0
-        n = n0
+        if source_param[0] == 0:
+            x, y, z =  source_param[1], source_param[2], source_param[3]
+            nux, nuy, nuz = source_param[4], source_param[5], source_param[6]
+            d = source_param[7]
+            n = source_param[8]
+            z_start = source_param[3]
 
         detR2 = detR**2
         while True:
@@ -192,6 +204,12 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
                     elif target_mask[x_index,y_index] == 0:
                         data_out[thread_id, photon_ind, :] = -5.0 #we are absorbed by target
                         break
+            
+            #check if we are out of tissue (when starting from tissue z boundary)
+            if start_from_media_z_boundary:
+                if t_rz > z_start:
+                    data_out[thread_id, photon_ind, :] = -6.0
+                    break
 
             # Update photon
             x, y, z = t_rx, t_ry, t_rz 

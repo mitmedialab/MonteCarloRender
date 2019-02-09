@@ -281,6 +281,11 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
         #[r[0:2], nu[0:2],theta d, n]
         source_param1 = np.array([r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], theta, 0.0, 0]).astype(float)
         source_param2 = np.array([0]).astype(float)
+    elif source['method'] == 'point': #point source is a special case of light cone
+        source_type = 1
+        theta = 2*math.pi
+        source_param1 = np.array([r0[0], r0[1], r0[2], 0, 0, -1, theta, 0.0, 0]).astype(float)
+        source_param2 = np.array([0]).astype(float)
     else:
         sys.exit("Source type is not supported")
             

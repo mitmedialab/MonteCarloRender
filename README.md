@@ -6,4 +6,4 @@ Current assumptions:
 - Homogenous media.
 - One detector, circular with given radius, at the origin, parallel to x-y plane, points to positive z direction.
 - Source is impulse pencil beam (location and direction can be changed)
-- Doesn't support any targets
+- Supports only 2D transmission mask Target

@@ -132,10 +132,10 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
     x_center_index = target_x_dim / 2
     y_center_index = target_y_dim / 2
     
-    if source_type == 1:
-        rand_theta = xoroshiro128p_uniform_float32(rng_states, thread_id)
+    if source_type >= 1:
+        rand_mu = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_psi = xoroshiro128p_uniform_float32(rng_states, thread_id)
-
+        
     for photon_ind in range(photons_per_thread):
         # Initiate photons based on the illumination type
         #determine x,y,z
@@ -143,12 +143,11 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
             x, y, z, z_start =  source_param1[0], source_param1[1], source_param1[2], source_param1[2]
             nux, nuy, nuz = source_param1[3], source_param1[4], source_param1[5]
             d, n = source_param1[6], source_param1[7]
-        elif source_type == 1: 
+        elif source_type == 1 or source_type == 2: #if source is cone or point source
             x, y, z, z_start =  source_param1[0], source_param1[1], source_param1[2], source_param1[2]
-            theta =source_param1[6]*(rand_theta-0.5) #theta is angle change of optical axis
+            mu = 1 - (1-math.cos(source_param1[6]))*rand_mu #sample uniformaly between [cos(half_angle),1]
             psi = 2*math.pi*rand_psi
-            mu = math.cos(theta)
-            sqrt_mu = math.sin(theta)
+            sqrt_mu = math.sqrt(1-mu**2)
             sin_psi = math.sin(psi)
             cos_psi = math.cos(psi)
             sqrt_w  = math.sqrt(1-source_param1[5]**2)
@@ -282,8 +281,8 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
         source_param1 = np.array([r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], theta, 0.0, 0]).astype(float)
         source_param2 = np.array([0]).astype(float)
     elif source['method'] == 'point': #point source is a special case of light cone
-        source_type = 1
-        theta = 2*math.pi
+        source_type = 2
+        theta = math.pi
         source_param1 = np.array([r0[0], r0[1], r0[2], 0, 0, -1, theta, 0.0, 0]).astype(float)
         source_param2 = np.array([0]).astype(float)
     else:

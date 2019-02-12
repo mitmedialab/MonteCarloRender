@@ -136,7 +136,20 @@ def lunchBatchGPU(batchSize = 1000,
 #            target_type[i,j]==0 : transparent
 #            target_type[i,j]==1 : diffuse reflection (Lambertian)
 #            target_type[i,j]==2 : mirror reflection (reflect along the z axis)
+# 
+# source_type:
+#         0: pencile
+#         1: cone
+#         2: area
+#         3: area+cone
 #
+# source_param1: 
+#    0, 1, 2,  3,   4,   5,      6,          7,     8, 9
+#    x, y, z, nux, nuy, nuz, half_angle, area_size, d, n
+#   cols 6,7 are used only if required by the chosen source_type
+#  
+#
+
 #  Return columns:
 #    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10
 #    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  reserved
@@ -151,6 +164,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
     x_center_index = target_x_dim / 2
     y_center_index = target_y_dim / 2
     z_min, z_max = z_range[0], z_range[1]
+    detR2 = detR**2
     
     if source_type == 1 or source_type == 3:
         rand_mu = xoroshiro128p_uniform_float32(rng_states, thread_id)
@@ -163,19 +177,17 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         data_out[thread_id, photon_ind, :] = -1.0
 
         # Initiate photons based on the illumination type (0: pencil, 1:cone(/point)
-        #get x,y,z       0 1 2  3   4   5       6        7      8 9
-        #source_param1: [x,y,z,nux,nuy,nuz,half_angle,area_size,d,n]
-        if source_type == 0 or source_type ==1: #fixed x,y,z (pencil, cone)
+        if source_type == 0 or source_type ==1: # Fixed x,y,z (pencil, cone)
             x, y, z =  source_param1[0], source_param1[1], source_param1[2]
-        elif source_type == 2 or source_type == 3: #are source or area_cone_source
+        elif source_type == 2 or source_type == 3: # Are source or area_cone_source
             x = source_param1[0] + source_param1[7] * (rand_x - 0.5)
             y = source_param1[1] + source_param1[7] * (rand_y - 0.5)
             z = source_param1[2]
         #get nux, nuy, nuz
-        if source_type == 0 or source_type == 2: #fixed angle (pencil, area)
+        if source_type == 0 or source_type == 2: # Fixed angle (pencil, area)
             nux, nuy, nuz = source_param1[3], source_param1[4], source_param1[5]
-        elif source_type == 1 or source_type == 3: #random angle with hald angle theta (cone or area_cone)
-            mu = 1 - (1-math.cos(source_param1[6]))*rand_mu #sample uniformaly between [cos(half_angle),1]
+        elif source_type == 1 or source_type == 3: # Random angle with hald angle theta (cone or area_cone)
+            mu = 1 - (1-math.cos(source_param1[6]))*rand_mu # Sample uniformaly between [cos(half_angle),1]
             psi = 2*math.pi*rand_psi
             sqrt_mu = math.sqrt(1-mu**2)
             sin_psi = math.sin(psi)
@@ -196,14 +208,12 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                 
         d, n = source_param1[8],source_param1[9]
 
-        detR2 = detR**2
         while True:
             # Get random numbers    
             rand1 = xoroshiro128p_uniform_float32(rng_states, thread_id) 
             rand2 = xoroshiro128p_uniform_float32(rng_states, thread_id) 
             rand3 = xoroshiro128p_uniform_float32(rng_states, thread_id)             
             
-            #print(r, nu, d, n)
             # Calc random prop distance
             cd = - math.log(rand1) / muS
 
@@ -212,7 +222,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
             t_ry = y + cd * nuy
             t_rz = z + cd * nuz
 
-            #check if we hit the detector
+            # Check if we hit the detector
             if t_rz <= 0: #did we pass the detector?
                 cd = - z / nuz
     
@@ -233,13 +243,13 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                     data_out[thread_id, photon_ind, 6] = nuy
                     data_out[thread_id, photon_ind, 7] = nuz
                     break
-                else:  # if we passed the detector and didn't hit it we should stop
+                else:  # If we passed the detector and didn't hit it we should stop
                     data_out[thread_id, photon_ind, :] = -1.0
                     break
             
-            if target_type > 0: # if target is simulated
-                if (t_rz - z_target) * (z - z_target) <=0 : # if we passed the target plane. See if we hit target
-                    #update the cooridnates for hitting the target
+            if target_type > 0: # If target is simulated
+                if (t_rz - z_target) * (z - z_target) <=0 : # If we passed the target plane. See if we hit target
+                    # Update the cooridnates for hitting the target
                     cd_target = (z_target - z) / nuz
                     t_rx_target = x + cd_target * nux 
                     t_ry_target = y + cd_target * nuy
@@ -279,7 +289,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                 elif target_mask[x_index, y_index] == 2:  # 2 is mirror reflection
                                     nuz = -nuz
 
-                                continue
+                                continue # Skip the "regular" photon update below
                                 
                                 
 
@@ -318,7 +328,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
             if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
                 data_out[thread_id, photon_ind, :] = -3.0
                 break    
-            if z_bounded:#check if we are out of tissue (when starting from tissue z boundary)
+            if z_bounded:# Check if we are out of tissue (when starting from tissue z boundary)
                 if t_rz > z_max or t_rz < z_min:
                     data_out[thread_id, photon_ind, :] = -6.0
                     break

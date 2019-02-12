@@ -119,9 +119,25 @@ def lunchBatchGPU(batchSize = 1000,
 
 
 
-#Return columns:
-#    0  1  2  3  4    5    6      7   8, 9, 10
-#    n, d, x ,y, z, mu_x, mu_y, mu_z, reserved 
+
+# Input
+# =====
+#  target_type:
+#         0: not simulated
+#         1: absorbing target
+#         2: scattering target
+#
+#  target_mask:
+#         if target_type==2 (scattering target):
+#            target_type[i,j]==0 : transparent
+#            target_type[i,j]==1 : diffuse reflection (Lambertian)
+#            target_type[i,j]==2 : mirror reflection (reflect along the z axis)
+#
+#  Return columns:
+#    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10
+#    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  reserved
+#   cols 8,9 are updated only with scattering target
+
 @cuda.jit
 def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0, n0, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target):
     
@@ -132,6 +148,8 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
     y_center_index = target_y_dim / 2
 
     for photon_ind in range(photons_per_thread):
+        data_out[thread_id, photon_ind, :] = -1.0
+        
         # NOTE: All photons in the thread start exactly the same!
         x, y, z =  r0[0], r0[1], r0[2]
         nux, nuy, nuz = nu0[0], nu0[1], nu0[2]
@@ -140,6 +158,15 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
 
         detR2 = detR**2
         while True:
+            # Should we stop
+            if n >= max_N:
+                data_out[thread_id, photon_ind, :] = -2.0
+                break
+            if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
+                data_out[thread_id, photon_ind, :] = -3.0
+                break
+                
+            # Get random numbers    
             rand1 = xoroshiro128p_uniform_float32(rng_states, thread_id) 
             rand2 = xoroshiro128p_uniform_float32(rng_states, thread_id) 
             rand3 = xoroshiro128p_uniform_float32(rng_states, thread_id)             
@@ -179,19 +206,51 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
                     data_out[thread_id, photon_ind, :] = -1.0
                     break
             
-            if target_type == 1: #if target is simulated
-                if (t_rz - z_target) * (z - z_target) <=0 : #we passed the target plane. See if we hit target
+            if target_type > 0: # if target is simulated
+                if (t_rz - z_target) * (z - z_target) <=0 : # if we passed the target plane. See if we hit target
+                    #update the cooridnates for hitting the target
                     cd_target = (z_target - z) / nuz
-                    x = x + cd_target * nux #this x is temporally, if simulation resumed, updated by tr_x immidiately
-                    y = y + cd_target * nuy
-                    x_index = int(math.floor(x / target_gridsize[0]) + x_center_index) #center of camera at x=0
-                    y_index = int(math.floor(y / target_gridsize[1]) + y_center_index) #canter of cameta at y=0
-                    if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
-                        data_out[thread_id, photon_ind, :] = -4.0 #photon is out of the bound of target
-                        break
-                    elif target_mask[x_index,y_index] == 0:
-                        data_out[thread_id, photon_ind, :] = -5.0 #we are absorbed by target
-                        break
+                    t_rx_target = x + cd_target * nux 
+                    t_ry_target = y + cd_target * nuy
+                    t_rz_target = z + cd_target * nuz
+                    
+                    x_index = int(math.floor(t_rx_target / target_gridsize[0]) + x_center_index) #center of camera at x=0
+                    y_index = int(math.floor(t_ry_target / target_gridsize[1]) + y_center_index) #canter of cameta at y=0
+                    
+                    if target_type == 1: # If this is an absorbing target
+                        if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
+                            data_out[thread_id, photon_ind, :] = -4.0 #photon is out of the bound of target
+                            break
+                        elif target_mask[x_index,y_index] == 0:
+                            data_out[thread_id, photon_ind, :] = -5.0 #we are absorbed by target
+                            break
+                            
+                    elif target_type == 2: # If this is a scattering target
+                        if x_index >= 0 and x_index < target_x_dim and y_index >= 0 and y_index < target_y_dim:
+                            if target_mask[x_index, y_index] > 0:  # 0 is transparent
+                                # Update photon to hit the target
+                                d += cd_target
+                                n += 1
+                                x, y, z = t_rx_target, t_ry_target, t_rz_target
+                                data_out[thread_id, photon_ind, 8] = n
+                                data_out[thread_id, photon_ind, 9] = d
+                                
+                                # Calculate scattering angle
+                                if target_mask[x_index, y_index] == 1:  # 1 is lambertian reflection
+                                    psi = 2 * math.pi * rand2
+                                    mu = 1 - 2 * rand3
+                                    sin_psi = math.sin(psi)
+                                    cos_psi = math.cos(psi)
+                                    sqrt_mu = math.sqrt(1-mu**2)                                
+                                    nux = sqrt_mu*cos_psi
+                                    nuy = -sqrt_mu*sin_psi
+                                    nuz = - abs(mu)                
+                                elif target_mask[x_index, y_index] == 2:  # 2 is mirror reflection
+                                    nuz = -nuz
+
+                                continue
+                                
+                                
 
             # Update photon
             x, y, z = t_rx, t_ry, t_rz 
@@ -221,13 +280,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, r0, nu0, d0,
                 nuy = -sqrt_mu*sin_psi
                 nuz = -mu
 
-            # Should we stop
-            if n >= max_N:
-                data_out[thread_id, photon_ind, :] = -2.0
-                break
-            if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
-                data_out[thread_id, photon_ind, :] = -3.0
-                break
+
 
         
     

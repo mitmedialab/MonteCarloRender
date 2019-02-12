@@ -179,7 +179,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         # Initiate photons based on the illumination type (0: pencil, 1:cone(/point)
         if source_type == 0 or source_type ==1: # Fixed x,y,z (pencil, cone)
             x, y, z =  source_param1[0], source_param1[1], source_param1[2]
-        elif source_type == 2 or source_type == 3: # Are source or area_cone_source
+        elif source_type == 2 or source_type == 3: # Area source or area_cone_source
             x = source_param1[0] + source_param1[7] * (rand_x - 0.5)
             y = source_param1[1] + source_param1[7] * (rand_y - 0.5)
             z = source_param1[2]
@@ -279,13 +279,13 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                 # Calculate scattering angle
                                 if target_mask[x_index, y_index] == 1:  # 1 is lambertian reflection
                                     psi = 2 * math.pi * rand2
-                                    mu = 1 - 2 * rand3
+                                    mu = -rand3  # This is instead of (mu = 1 - 2 * rand3) because we know we want nuz to be negative (nuz = - abs(mu))
                                     sin_psi = math.sin(psi)
                                     cos_psi = math.cos(psi)
                                     sqrt_mu = math.sqrt(1-mu**2)                                
                                     nux = sqrt_mu*cos_psi
                                     nuy = -sqrt_mu*sin_psi
-                                    nuz = - abs(mu)                
+                                    nuz = mu
                                 elif target_mask[x_index, y_index] == 2:  # 2 is mirror reflection
                                     nuz = -nuz
 

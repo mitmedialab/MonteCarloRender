@@ -152,7 +152,7 @@ def lunchBatchGPU(batchSize = 1000,
 
 #  Return columns:
 #    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10
-#    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  reserved
+#    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  n_target_hit_times
 #   cols 8,9 are updated only with scattering target
 
 @cuda.jit
@@ -175,8 +175,9 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         
     for photon_ind in range(photons_per_thread):
         data_out[thread_id, photon_ind, :] = -1.0
+        data_out[thread_id, photon_ind, 10] = 0
 
-        # Initiate photons based on the illumination type (0: pencil, 1:cone(/point)
+        # Initialize photon based on the illumination type
         if source_type == 0 or source_type ==1: # Fixed x,y,z (pencil, cone)
             x, y, z =  source_param1[0], source_param1[1], source_param1[2]
         elif source_type == 2 or source_type == 3: # Area source or area_cone_source
@@ -205,10 +206,22 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                 nux = source_param1[3]*mu +(source_param1[3]*source_param1[5]*cos_psi - source_param1[4]*sin_psi)*sqrt_mu/sqrt_w
                 nuy = source_param1[4]*mu +(source_param1[4]*source_param1[5]*cos_psi + source_param1[3]*sin_psi)*sqrt_mu/sqrt_w
                 nuz = source_param1[5]*mu - cos_psi*sqrt_mu*sqrt_w
-                
         d, n = source_param1[8],source_param1[9]
 
+        # Start Monte Carlo inifinite loop
         while True:
+            # Should we stop
+            if n >= max_N:
+                data_out[thread_id, photon_ind, 1:] = -2.0
+                break
+            if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
+                data_out[thread_id, photon_ind, 1:] = -3.0
+                break    
+            if z_bounded:# Check if we are out of tissue (when starting from tissue z boundary)
+                if z > z_max or z < z_min:
+                    data_out[thread_id, photon_ind, 1:] = -6.0
+                    break
+                    
             # Get random numbers    
             rand1 = xoroshiro128p_uniform_float32(rng_states, thread_id) 
             rand2 = xoroshiro128p_uniform_float32(rng_states, thread_id) 
@@ -244,7 +257,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                     data_out[thread_id, photon_ind, 7] = nuz
                     break
                 else:  # If we passed the detector and didn't hit it we should stop
-                    data_out[thread_id, photon_ind, :] = -1.0
+                    data_out[thread_id, photon_ind, 1:] = -1.0
                     break
             
             if target_type > 0: # If target is simulated
@@ -260,21 +273,28 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                     
                     if target_type == 1: # If this is an absorbing target
                         if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
-                            data_out[thread_id, photon_ind, :] = -4.0 #photon is out of the bound of target
+                            data_out[thread_id, photon_ind, 1:] = -4.0 #photon is out of the bound of target
                             break
                         elif target_mask[x_index,y_index] == 0:
-                            data_out[thread_id, photon_ind, :] = -5.0 #we are absorbed by target
+                            data_out[thread_id, photon_ind, 1:] = -5.0 #we are absorbed by target
                             break
                             
                     elif target_type == 2: # If this is a scattering target
                         if x_index >= 0 and x_index < target_x_dim and y_index >= 0 and y_index < target_y_dim:
                             if target_mask[x_index, y_index] > 0:  # 0 is transparent
+                                if z > z_target: # We want to drop photons that hit the target on the backside
+                                    data_out[thread_id, photon_ind, 1:] = -7.0 # Hit target on back side
+                                    break
+                                    
                                 # Update photon to hit the target
                                 d += cd_target
                                 n += 1
                                 x, y, z = t_rx_target, t_ry_target, t_rz_target
+                                z-=0.0001 # We want to shift the photon a little bit from the target, otherwise in the next loop it'll hit the target again by definition (z==z_target)
                                 data_out[thread_id, photon_ind, 8] = n
                                 data_out[thread_id, photon_ind, 9] = d
+                                data_out[thread_id, photon_ind, 10] +=1
+                                data_out[thread_id, photon_ind, 0] = 0  # This helps us to record the photon hit the target in case it wasn't detected later
                                 
                                 # Calculate scattering angle
                                 if target_mask[x_index, y_index] == 1:  # 1 is lambertian reflection
@@ -321,17 +341,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                 nuy = -sqrt_mu*sin_psi
                 nuz = -mu
 
-            # Should we stop
-            if n >= max_N:
-                data_out[thread_id, photon_ind, :] = -2.0
-                break
-            if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
-                data_out[thread_id, photon_ind, :] = -3.0
-                break    
-            if z_bounded:# Check if we are out of tissue (when starting from tissue z boundary)
-                if t_rz > z_max or t_rz < z_min:
-                    data_out[thread_id, photon_ind, :] = -6.0
-                    break
+
 
                     
 # returns source_type id, source_param1([x, y, z, nux, nuy, nuz, theta, grid_size (for area source), d, n]), 

@@ -52,6 +52,7 @@ def lunchPacketwithBatch(batchSize = 1000,
     
     num_detected = 0
     num_simulated = 0
+    num_hit_target_not_detected = 0
     
     while num_simulated < nPhotonsToRun and num_detected < nPhotonsRequested:
         print('{:.0e}'.format(num_simulated), end="\r")
@@ -63,7 +64,8 @@ def lunchPacketwithBatch(batchSize = 1000,
                        max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target,
                        z_bounded = z_bounded, z_range = z_range)
         # Not valid photons return with n=-1 - so remove them
-        ret = ret[ret[:, 0]>=0, :]
+        num_hit_target_not_detected += np.sum(ret[:,0]==0)
+        ret = ret[ret[:, 0]>0, :]
         if ret.shape[0] > nPhotonsRequested - num_detected:
             ret = ret[:nPhotonsRequested - num_detected, :]
         data[num_detected : (num_detected+ret.shape[0]), :] = ret
@@ -73,7 +75,7 @@ def lunchPacketwithBatch(batchSize = 1000,
     data = data[:num_detected, :] 
     if normalize_d is not None:
         data[:, 1] *= normalize_d
-    return data, num_simulated, num_detected
+    return data, num_simulated, num_detected, num_hit_target_not_detected
 
 
 def lunchBatchGPU(batchSize = 1000,
@@ -294,8 +296,8 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                     t_ry_target = y + cd_target * nuy
                     t_rz_target = z + cd_target * nuz
                     
-                    x_index = int(math.floor(t_rx_target / target_gridsize[0]) + x_center_index) #center of camera at x=0
-                    y_index = int(math.floor(t_ry_target / target_gridsize[1]) + y_center_index) #canter of cameta at y=0
+                    x_index = int(math.floor(t_rx_target / target_gridsize[0] + x_center_index)) #center of camera at x=0
+                    y_index = int(math.floor(t_ry_target / target_gridsize[1] + y_center_index)) #canter of cameta at y=0
                     
                     if target_type == 1: # If this is an absorbing target
                         if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:

@@ -26,7 +26,7 @@ def lunchPacketwithBatch(batchSize = 1000,
                         source = {'r': np.array([0.0, 0.0, 0.0]),
                                   'mu': np.array([0.0, 0.0, 1.0]),
                                   'method': 'pencil', 'time_profile': 'delta'},
-                        detector = {'radius': 10.0},
+                        detector = {'type': 0, 'radius': 10.0, 'z_detector': 10.0},
                         control_param = {'max_N': 1e5,
                                          'max_distance_from_det': 1000},
                         normalize_d = None,
@@ -44,6 +44,8 @@ def lunchPacketwithBatch(batchSize = 1000,
     max_N = control_param['max_N']
     max_distance_from_det = float(control_param['max_distance_from_det'])
     
+    detector_params = getDetectorParams(detector, target)
+    
     nPhotonsRequested = int(nPhotonsRequested)
     batchSize = int(batchSize)
     data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)), dtype=float)
@@ -56,7 +58,7 @@ def lunchPacketwithBatch(batchSize = 1000,
         ret = lunchBatchGPU(batchSize = batchSize,
                          muS = muS, g = g,
                        source = source,
-                       detR = detR,
+                       detector_params = detector_params,
                        max_N = max_N,
                        max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target,
                        z_bounded = z_bounded, z_range = z_range)
@@ -79,7 +81,7 @@ def lunchBatchGPU(batchSize = 1000,
                source = {'r': np.array([0.0, 0.0, 0.0]),
                           'mu': np.array([0.0, 0.0, 1.0]),
                           'method': 'pencil', 'time_profile': 'delta'},
-               detR = 1.0,
+               detector_params = [0, 0, 0, 0, 0, 0, 0],
                max_N = 1e5,
                max_distance_from_det = 1000.0,
                ret_cols = [0,1,2,3],
@@ -94,6 +96,7 @@ def lunchBatchGPU(batchSize = 1000,
     
     muS = float(muS)
     g = float(g)
+    detector_params = np.array(detector_params).astype(float)
     
     source_type, source_param1, source_param2 = simSource(source = source)
         
@@ -113,7 +116,7 @@ def lunchBatchGPU(batchSize = 1000,
     data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
     rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detR, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,z_bounded, z_range)
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detector_params, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,z_bounded, z_range)
         
     data = data_out.copy_to_host()
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
@@ -148,15 +151,20 @@ def lunchBatchGPU(batchSize = 1000,
 #    x, y, z, nux, nuy, nuz, half_angle, area_size, d, n
 #   cols 6,7 are used only if required by the chosen source_type
 #  
+# detector_params:
+#      0,        1,            2,          3, 
+#    Type, Aperture size, focal_length, Radius, 
 #
-
+#    detector types: 0: bare sensor (only Aperture size is used),  
+#                    1: lens
+#
 #  Return columns:
 #    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10
 #    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  n_target_hit_times
 #   cols 8,9 are updated only with scattering target
 
 @cuda.jit
-def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detR, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,z_bounded, z_range):
+def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detector_params, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,z_bounded, z_range):
     
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]
@@ -164,7 +172,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
     x_center_index = target_x_dim / 2
     y_center_index = target_y_dim / 2
     z_min, z_max = z_range[0], z_range[1]
-    detR2 = detR**2
+    detR2 = detector_params[1]**2
     
     if source_type == 1 or source_type == 3:
         rand_mu = xoroshiro128p_uniform_float32(rng_states, thread_id)
@@ -243,10 +251,28 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                 t_ry = y + cd * nuy
                 t_rz = z + cd * nuz
             
-                if t_rx**2 + t_ry**2 < detR2:
+                if t_rx**2 + t_ry**2 < detR2: # If we hit the aperture
                     d+=cd
                     n+=1
                     x,y,z = t_rx, t_ry, t_rz
+                    
+                    if detector_params[0]==1: # This is a lens
+                        # Currently we have x,y,z,nux,nuy,nuz right before the lens                        
+                        # Update angle and distance based on lens
+                        # Propogation distance inside lens is: th - R + sqrt(R^2 - x^2) where th is thickness and R is radius
+                        alphax = -math.atan(nux/nuz)
+                        alphay = -math.atan(nuy/nuz)
+                        alphax = alphax - x/detector_params[2]
+                        alphay = alphay - y/detector_params[2]
+                        d += (detector_params[3] - detector_params[4] + math.sqrt(detector_params[4]**2 - (x**2+y**2))) / detector_params[5]
+                        
+                        #Propogate to sensor
+                        x += alphax * detector_params[6]
+                        y += alphay * detector_params[6]
+                        z -= detector_params[6]
+                        d += math.sqrt( (alphax * detector_params[6])**2 + (alphay * detector_params[6])**2 + (detector_params[6])**2 )
+                        nux, nuy, nuz = 0, 0, 0  # We don't bother recalculating these angles
+                        
                     data_out[thread_id, photon_ind, 0] = n
                     data_out[thread_id, photon_ind, 1] = d
                     data_out[thread_id, photon_ind, 2] = x
@@ -385,8 +411,69 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
     return source_type, source_param1, source_param2
 
 
+# detector_params:
+#      0,        1,            2,          3, 
+#    Type, Aperture size, focal_length, Radius, 
+#
+#    detector types: 0: bare sensor (only Aperture size is used),  
+#                    1: lens
+def getDetectorParams(detector, target):
+    if 'type' not in detector:
+        dtype = 0
+    else:
+        dtype = detector['type']
+    
+    if 'radius' not in detector:
+        detR = 10.0
+    else:
+        detR = detector['radius']
+    
+    if 'z_detector' not in detector:
+        zd = 10.0
+    else:
+        zd = detector['z_detector']    
+    
+    if 'focus_target' not in detector:
+        if 'z_target' in target and target['type']>0:
+            z0 = target['z_target']
+        else:
+            z0 = 10.0
+    else:
+        z0 = detector['focus_target']
+    
+    if dtype == 0:
+        detector_params = [0, detR, 0, 0, 0, 0, 0]
+    elif dtype == 1:
+        R = 1.05 * detR
+        thickness = 1.05 * (R - math.sqrt(R**2 - detR**2))
+        f = 1/(1/zd + 1/z0)
 
+        n = 1 + R/(2*f)
 
+        A = 2*R - thickness
+        B = 2*thickness - 2*R - R*R/f
+        C = -thickness
+        n = (-B + math.sqrt(B*B - 4*A*C)) / (2*A)
+
+        if R <= thickness/2:
+            print('Detector Params Error 1')
+            return None
+        if R < detR:
+            print('Detector Params Error 1')
+            return None
+        if detR > math.sqrt(2*R*thickness - thickness**2):
+            print('Detector Params Error 1')
+            return None
+        detector_params = [1, detR, f, thickness, R, n, zd]
+    else:
+        print('Undefined detector type')
+    
+    print ('Detector type: '+ str(detector_params[0]) +', Aperture size: ' + '{0:.1f}'.format(detector_params[1]) \
+           + ', f: ' + '{0:.1f}'.format(detector_params[2])+ ', thickness: ' + '{0:.1f}'.format(detector_params[3])\
+           +', R: ' + '{0:.1f}'.format(detector_params[4]) + ', n: ' + '{0:.1f}'.format(detector_params[5])\
+           + ', z sensor: '+ '{0:.1f}'.format(detector_params[6]))   
+    
+    return detector_params
 
 
 

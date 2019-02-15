@@ -36,7 +36,8 @@ def lunchPacketwithBatch(batchSize = 1000,
                                   'grid_size':np.array([1,1]),
                                   'z_target':20},
                         z_bounded = False,
-                        z_range = np.array([0.0,30.0])
+                        z_range = np.array([0.0,30.0]),
+                        device_id = 0
                         ):
     muS = float(muS)
     g = float(g)
@@ -62,7 +63,7 @@ def lunchPacketwithBatch(batchSize = 1000,
                        detector_params = detector_params,
                        max_N = max_N,
                        max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target,
-                       z_bounded = z_bounded, z_range = z_range)
+                       z_bounded = z_bounded, z_range = z_range, device_id = device_id)
         # Not valid photons return with n=-1 - so remove them
         num_hit_target_not_detected += np.sum(ret[:,0]==0)
         ret = ret[ret[:, 0]>0, :]
@@ -92,10 +93,9 @@ def lunchBatchGPU(batchSize = 1000,
                          'grid_size':np.array([1,1]),
                          'z_target':20},
                z_bounded = False,
-               z_range = np.array([0.0,30.0])
+               z_range = np.array([0.0,30.0]),
+               device_id = 0
             ):
-    
-    
     muS = float(muS)
     g = float(g)
     detector_params = np.array(detector_params).astype(float)
@@ -112,7 +112,6 @@ def lunchBatchGPU(batchSize = 1000,
     threads_per_block = 256 
     blocks = 64
     photons_per_thread = int(np.ceil(float(batchSize)/(threads_per_block * blocks)))
-    device_id = 0
 
     device = cuda.select_device(device_id)
     data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)

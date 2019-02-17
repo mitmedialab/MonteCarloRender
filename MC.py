@@ -175,26 +175,44 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
     z_min, z_max = z_range[0], z_range[1]
     detR2 = detector_params[1]**2
     
+    if source_type == 4:
+        SL_x_center_index = source_param1[0]/2
+        SL_y_center_index = source_param1[1]/2
+        SL_list_length = len(source_param2)
+        
+    
     if source_type == 1 or source_type == 3:
         rand_mu = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_psi = xoroshiro128p_uniform_float32(rng_states, thread_id)
-    if source_type == 2 or source_type == 3:
+    if source_type == 2 or source_type == 3 or source_type == 4:
         rand_x = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_y = xoroshiro128p_uniform_float32(rng_states, thread_id)
+    if source_type == 4:
+        rand_index = xoroshiro128p_uniform_float32(rng_states, thread_id)
         
     for photon_ind in range(photons_per_thread):
         data_out[thread_id, photon_ind, :] = -1.0
         data_out[thread_id, photon_ind, 10] = 0
 
         # Initialize photon based on the illumination type
-        if source_type == 0 or source_type ==1: # Fixed x,y,z (pencil, cone)
+        if source_type == 0 or source_type ==1 : # Fixed x,y,z (pencil, cone)
             x, y, z =  source_param1[0], source_param1[1], source_param1[2]
-        elif source_type == 2 or source_type == 3: # Area source or area_cone_source
+        elif source_type == 2 or source_type == 3: # Area source or area_cone_source 
             x = source_param1[0] + source_param1[7] * (rand_x - 0.5)
             y = source_param1[1] + source_param1[7] * (rand_y - 0.5)
             z = source_param1[2]
+        elif source_type == 4: # Structured Pattern
+            x = source_param1[7] * (rand_x - 0.5)
+            y = source_param1[7] * (rand_y - 0.5)
+            z = source_param1[2]
+            index_index = math.floor(rand_index * SL_list_length)
+            pattern_index = source_param2[int(index_index)]
+            x_offset = ((pattern_index % source_param1[0]) - SL_x_center_index + 0.5) * source_param1[7]
+            y_offset = (math.floor(pattern_index / source_param1[0]) - SL_y_center_index + 0.5) * source_param1[7]
+            x += x_offset
+            y += y_offset
         #get nux, nuy, nuz
-        if source_type == 0 or source_type == 2: # Fixed angle (pencil, area)
+        if source_type == 0 or source_type == 2 or source_type == 4: # Fixed angle (pencil, area)
             nux, nuy, nuz = source_param1[3], source_param1[4], source_param1[5]
         elif source_type == 1 or source_type == 3: # Random angle with hald angle theta (cone or area_cone)
             mu = 1 - (1-math.cos(source_param1[6]))*rand_mu # Sample uniformaly between [cos(half_angle),1]
@@ -406,6 +424,15 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
         theta = source['theta']
         source_param1 = np.array([r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], theta, size, 0.0, 0]).astype(float)
         source_param2 = np.array([0]).astype(float)
+    elif source['method'] == 'structured_pattern': #structured light
+        source_type = 4
+        size = source['size']
+        SL_xdim = source['pattern'].shape[1]
+        SL_ydim = source['pattern'].shape[0]
+        pattern_1D = source['pattern'].flatten()
+        source_param1 = np.array([SL_xdim, SL_ydim, r0[2], nu0[0], nu0[1], nu0[2], 0.0, size, 0.0, 0]).astype(float)
+        source_param2 = np.argwhere(pattern_1D == 1).flatten().astype(float)
+        
     else:
         sys.exit("Source type is not supported")
             

@@ -320,13 +320,13 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                         if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
                             data_out[thread_id, photon_ind, 1:] = -4.0 #photon is out of the bound of target
                             break
-                        elif target_mask[x_index,y_index] == 0:
+                        elif target_mask[y_index,x_index] == 0:
                             data_out[thread_id, photon_ind, 1:] = -5.0 #we are absorbed by target
                             break
                             
                     elif target_type == 2: # If this is a scattering target
                         if x_index >= 0 and x_index < target_x_dim and y_index >= 0 and y_index < target_y_dim:
-                            if target_mask[x_index, y_index] > 0:  # 0 is transparent
+                            if target_mask[y_index, x_index] > 0:  # 0 is transparent
                                 if z > z_target: # We want to drop photons that hit the target on the backside
                                     data_out[thread_id, photon_ind, 1:] = -7.0 # Hit target on back side
                                     break
@@ -342,7 +342,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                 data_out[thread_id, photon_ind, 0] = 0  # This helps us to record the photon hit the target in case it wasn't detected later
                                 
                                 # Calculate scattering angle
-                                if target_mask[x_index, y_index] == 1:  # 1 is lambertian reflection
+                                if target_mask[y_index, x_index] == 1:  # 1 is lambertian reflection
                                     psi = 2 * math.pi * rand2
                                     mu = -rand3  # This is instead of (mu = 1 - 2 * rand3) because we know we want nuz to be negative (nuz = - abs(mu))
                                     sin_psi = math.sin(psi)
@@ -351,7 +351,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                     nux = sqrt_mu*cos_psi
                                     nuy = -sqrt_mu*sin_psi
                                     nuz = mu
-                                elif target_mask[x_index, y_index] == 2:  # 2 is mirror reflection
+                                elif target_mask[y_index, x_index] == 2:  # 2 is mirror reflection
                                     nuz = -nuz
 
                                 continue # Skip the "regular" photon update below

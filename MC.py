@@ -146,11 +146,14 @@ def lunchBatchGPU(batchSize = 1000,
 #         1: cone
 #         2: area
 #         3: area+cone
+#         4: structured pattern
+#         5: structured pattern + cone
 #
 # source_param1: 
 #    0, 1, 2,  3,   4,   5,      6,          7,     8, 9
 #    x, y, z, nux, nuy, nuz, half_angle, area_size, d, n
 #   cols 6,7 are used only if required by the chosen source_type
+#   when soruce_type is structured pattern, 0, 1 are x_dim, y_dim of structured light (center of 2D pattern at (0,0))
 #  
 # detector_params:
 #      0,        1,            2,          3, 
@@ -181,13 +184,13 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         SL_list_length = len(source_param2)
         
     
-    if source_type in [1,3,5]:
+    if source_type in [1,3,5]: #if random angle
         rand_mu = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_psi = xoroshiro128p_uniform_float32(rng_states, thread_id)
-    if source_type in [2,3,4,5]:
+    if source_type in [2,3,4,5]: #if random position
         rand_x = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_y = xoroshiro128p_uniform_float32(rng_states, thread_id)
-    if source_type in [4,5]:
+    if source_type in [4,5]: #if structured pattern
         rand_index = xoroshiro128p_uniform_float32(rng_states, thread_id)
         
     for photon_ind in range(photons_per_thread):
@@ -198,15 +201,15 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         if source_type == 0 or source_type ==1 : # Fixed x,y,z (pencil, cone)
             x, y, z =  source_param1[0], source_param1[1], source_param1[2]
         elif source_type == 2 or source_type == 3: # Area source or area_cone_source 
-            x = source_param1[0] + source_param1[7] * (rand_x - 0.5)
+            x = source_param1[0] + source_param1[7] * (rand_x - 0.5) #sample position 
             y = source_param1[1] + source_param1[7] * (rand_y - 0.5)
             z = source_param1[2]
         elif source_type == 4 or source_type == 5: # Structured Pattern
-            x = source_param1[7] * (rand_x - 0.5)
+            x = source_param1[7] * (rand_x - 0.5) #sample position within a pixel
             y = source_param1[7] * (rand_y - 0.5)
             z = source_param1[2]
-            index_index = math.floor(rand_index * SL_list_length)
-            pattern_index = source_param2[int(index_index)]
+            random_index = math.floor(rand_index * SL_list_length) #sample pixel
+            pattern_index = source_param2[int(random_index)]
             x_offset = ((pattern_index % source_param1[0]) - SL_x_center_index + 0.5) * source_param1[7]
             y_offset = (math.floor(pattern_index / source_param1[0]) - SL_y_center_index + 0.5) * source_param1[7]
             x += x_offset

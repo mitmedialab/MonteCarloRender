@@ -146,11 +146,14 @@ def lunchBatchGPU(batchSize = 1000,
 #         1: cone
 #         2: area
 #         3: area+cone
+#         4: structured pattern
+#         5: structured pattern + cone
 #
 # source_param1: 
 #    0, 1, 2,  3,   4,   5,      6,          7,     8, 9
 #    x, y, z, nux, nuy, nuz, half_angle, area_size, d, n
 #   cols 6,7 are used only if required by the chosen source_type
+#   when soruce_type is structured pattern, 0, 1 are x_dim, y_dim of structured light (center of 2D pattern at (0,0))
 #  
 # detector_params:
 #      0,        1,            2,          3, 
@@ -175,28 +178,46 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
     z_min, z_max = z_range[0], z_range[1]
     detR2 = detector_params[1]**2
     
-    if source_type == 1 or source_type == 3:
+    if source_type in [4,5]:
+        SL_x_center_index = source_param1[0]/2
+        SL_y_center_index = source_param1[1]/2
+        SL_list_length = len(source_param2)
+        
+    
+    if source_type in [1,3,5]: #if random angle
         rand_mu = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_psi = xoroshiro128p_uniform_float32(rng_states, thread_id)
-    if source_type == 2 or source_type == 3:
+    if source_type in [2,3,4,5]: #if random position
         rand_x = xoroshiro128p_uniform_float32(rng_states, thread_id)
         rand_y = xoroshiro128p_uniform_float32(rng_states, thread_id)
+    if source_type in [4,5]: #if structured pattern
+        rand_index = xoroshiro128p_uniform_float32(rng_states, thread_id)
         
     for photon_ind in range(photons_per_thread):
         data_out[thread_id, photon_ind, :] = -1.0
         data_out[thread_id, photon_ind, 10] = 0
 
         # Initialize photon based on the illumination type
-        if source_type == 0 or source_type ==1: # Fixed x,y,z (pencil, cone)
+        if source_type == 0 or source_type ==1 : # Fixed x,y,z (pencil, cone)
             x, y, z =  source_param1[0], source_param1[1], source_param1[2]
-        elif source_type == 2 or source_type == 3: # Area source or area_cone_source
-            x = source_param1[0] + source_param1[7] * (rand_x - 0.5)
+        elif source_type == 2 or source_type == 3: # Area source or area_cone_source 
+            x = source_param1[0] + source_param1[7] * (rand_x - 0.5) #sample position 
             y = source_param1[1] + source_param1[7] * (rand_y - 0.5)
             z = source_param1[2]
+        elif source_type == 4 or source_type == 5: # Structured Pattern
+            x = source_param1[7] * (rand_x - 0.5) #sample position within a pixel
+            y = source_param1[7] * (rand_y - 0.5)
+            z = source_param1[2]
+            random_index = math.floor(rand_index * SL_list_length) #sample pixel
+            pattern_index = source_param2[int(random_index)]
+            x_offset = ((pattern_index % source_param1[0]) - SL_x_center_index + 0.5) * source_param1[7]
+            y_offset = (math.floor(pattern_index / source_param1[0]) - SL_y_center_index + 0.5) * source_param1[7]
+            x += x_offset
+            y += y_offset
         #get nux, nuy, nuz
-        if source_type == 0 or source_type == 2: # Fixed angle (pencil, area)
+        if source_type == 0 or source_type == 2 or source_type == 4: # Fixed angle (pencil, area)
             nux, nuy, nuz = source_param1[3], source_param1[4], source_param1[5]
-        elif source_type == 1 or source_type == 3: # Random angle with hald angle theta (cone or area_cone)
+        else: # Random angle with hald angle theta (cone or area_cone)
             mu = 1 - (1-math.cos(source_param1[6]))*rand_mu # Sample uniformaly between [cos(half_angle),1]
             psi = 2*math.pi*rand_psi
             sqrt_mu = math.sqrt(1-mu**2)
@@ -302,13 +323,13 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                         if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
                             data_out[thread_id, photon_ind, 1:] = -4.0 #photon is out of the bound of target
                             break
-                        elif target_mask[x_index,y_index] == 0:
+                        elif target_mask[y_index,x_index] == 0:
                             data_out[thread_id, photon_ind, 1:] = -5.0 #we are absorbed by target
                             break
                             
                     elif target_type == 2: # If this is a scattering target
                         if x_index >= 0 and x_index < target_x_dim and y_index >= 0 and y_index < target_y_dim:
-                            if target_mask[x_index, y_index] > 0:  # 0 is transparent
+                            if target_mask[y_index, x_index] > 0:  # 0 is transparent
                                 if z > z_target: # We want to drop photons that hit the target on the backside
                                     data_out[thread_id, photon_ind, 1:] = -7.0 # Hit target on back side
                                     break
@@ -324,7 +345,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                 data_out[thread_id, photon_ind, 0] = 0  # This helps us to record the photon hit the target in case it wasn't detected later
                                 
                                 # Calculate scattering angle
-                                if target_mask[x_index, y_index] == 1:  # 1 is lambertian reflection
+                                if target_mask[y_index, x_index] == 1:  # 1 is lambertian reflection
                                     psi = 2 * math.pi * rand2
                                     mu = -rand3  # This is instead of (mu = 1 - 2 * rand3) because we know we want nuz to be negative (nuz = - abs(mu))
                                     sin_psi = math.sin(psi)
@@ -333,7 +354,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                     nux = sqrt_mu*cos_psi
                                     nuy = -sqrt_mu*sin_psi
                                     nuz = mu
-                                elif target_mask[x_index, y_index] == 2:  # 2 is mirror reflection
+                                elif target_mask[y_index, x_index] == 2:  # 2 is mirror reflection
                                     nuz = -nuz
 
                                 continue # Skip the "regular" photon update below
@@ -406,6 +427,23 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
         theta = source['theta']
         source_param1 = np.array([r0[0], r0[1], r0[2], nu0[0], nu0[1], nu0[2], theta, size, 0.0, 0]).astype(float)
         source_param2 = np.array([0]).astype(float)
+    elif source['method'] == 'structured_pattern': #structured light
+        source_type = 4
+        size = source['size']
+        SL_xdim = source['pattern'].shape[1]
+        SL_ydim = source['pattern'].shape[0]
+        pattern_1D = source['pattern'].flatten()
+        source_param1 = np.array([SL_xdim, SL_ydim, r0[2], nu0[0], nu0[1], nu0[2], 0.0, size, 0.0, 0]).astype(float)
+        source_param2 = np.argwhere(pattern_1D == 1).flatten().astype(float)
+    elif source['method'] == 'structured_pattern_cone':
+        source_type = 5
+        size = source['size']
+        theta = source['theta']
+        SL_xdim = source['pattern'].shape[1]
+        SL_ydim = source['pattern'].shape[0]
+        pattern_1D = source['pattern'].flatten()
+        source_param1 = np.array([SL_xdim, SL_ydim, r0[2], nu0[0], nu0[1], nu0[2], theta, size, 0.0, 0]).astype(float)
+        source_param2 = np.argwhere(pattern_1D == 1).flatten().astype(float)
     else:
         sys.exit("Source type is not supported")
             

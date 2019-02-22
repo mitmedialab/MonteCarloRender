@@ -102,17 +102,23 @@ def GPUWrapper(device_id, batchSize, muS, g,
     photons_per_thread = int(np.ceil(float(batchSize)/(threads_per_block * blocks)))
 
     device = cuda.select_device(device_id)
-    data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
-    rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
+    stream = cuda.stream()  # use stream to trigger async memory transfer
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, 
+    data = np.ndarray(shape=(threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
+    data_out_device = cuda.device_array_like(data, stream=stream)
+    
+    rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=(np.random.randint(sys.maxsize)-128)+device_id)
+    
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out_device, photons_per_thread, muS, g, 
                                              source_type, source_param1, source_param2, 
                                              detector_params, 
                                              max_N, max_distance_from_det, 
                                              target_type, target_mask, target_gridsize, 
                                              z_target, z_bounded, z_range)
-        
-    data = data_out.copy_to_host()
+    
+    data_out_device.copy_to_host(data, stream=stream)
+    stream.synchronize()
+
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
     data = data[:, ret_cols]
 

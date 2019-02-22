@@ -46,6 +46,16 @@ def lunchPacketwithBatch(batchSize = 1000,
     max_distance_from_det = float(control_param['max_distance_from_det'])
     
     detector_params = getDetectorParams(detector, target)
+    detector_params = np.array(detector_params).astype(float)
+    
+    source_type, source_param1, source_param2 = simSource(source = source)
+        
+    target_type = target['type']
+    target_mask = target['mask']
+    target_gridsize = target['grid_size'].astype(float)
+    z_target = target['z_target']
+    
+    z_range = z_range.astype(float)     
     
     nPhotonsRequested = int(nPhotonsRequested)
     batchSize = int(batchSize)
@@ -54,16 +64,17 @@ def lunchPacketwithBatch(batchSize = 1000,
     num_detected = 0
     num_simulated = 0
     num_hit_target_not_detected = 0
-    
+        
     while num_simulated < nPhotonsToRun and num_detected < nPhotonsRequested:
         print('{:.0e}'.format(num_simulated), end="\r")
-        ret = lunchBatchGPU(batchSize = batchSize,
-                         muS = muS, g = g,
-                       source = source,
-                       detector_params = detector_params,
-                       max_N = max_N,
-                       max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target,
-                       z_bounded = z_bounded, z_range = z_range, device_id = device_id)
+        
+        ret = GPUWrapper(device_id, batchSize, muS, g, 
+                         source_type, source_param1, source_param2, 
+                         detector_params, 
+                         max_N, max_distance_from_det, 
+                         target_type, target_mask, target_gridsize, 
+                         z_target, z_bounded, z_range, ret_cols)
+        
         # Not valid photons return with n=-1 - so remove them
         num_hit_target_not_detected += np.sum(ret[:,0]==0)
         ret = ret[ret[:, 0]>0, :]
@@ -79,35 +90,12 @@ def lunchPacketwithBatch(batchSize = 1000,
     return data, num_simulated, num_detected, num_hit_target_not_detected
 
 
-def lunchBatchGPU(batchSize = 1000,
-               muS  =  1.0, g = 0.85,
-               source = {'r': np.array([0.0, 0.0, 0.0]),
-                          'mu': np.array([0.0, 0.0, 1.0]),
-                          'method': 'pencil', 'time_profile': 'delta'},
-               detector_params = [0, 0, 0, 0, 0, 0, 0],
-               max_N = 1e5,
-               max_distance_from_det = 1000.0,
-               ret_cols = [0,1,2,3],
-               target = {'type':0,
-                         'mask':np.zeros(shape=(60,60)),
-                         'grid_size':np.array([1,1]),
-                         'z_target':20},
-               z_bounded = False,
-               z_range = np.array([0.0,30.0]),
-               device_id = 0
-            ):
-    muS = float(muS)
-    g = float(g)
-    detector_params = np.array(detector_params).astype(float)
-    
-    source_type, source_param1, source_param2 = simSource(source = source)
-        
-    target_type = target['type']
-    target_mask = target['mask']
-    target_gridsize = target['grid_size'].astype(float)
-    z_target = target['z_target']
-    
-    z_range = z_range.astype(float)
+def GPUWrapper(device_id, batchSize, muS, g, 
+                         source_type, source_param1, source_param2, 
+                         detector_params, 
+                         max_N, max_distance_from_det, 
+                         target_type, target_mask, target_gridsize, 
+                         z_target, z_bounded, z_range, ret_cols):
     
     threads_per_block = 256 
     blocks = 64
@@ -117,7 +105,12 @@ def lunchBatchGPU(batchSize = 1000,
     data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
     rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detector_params, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,z_bounded, z_range)
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, 
+                                             source_type, source_param1, source_param2, 
+                                             detector_params, 
+                                             max_N, max_distance_from_det, 
+                                             target_type, target_mask, target_gridsize, 
+                                             z_target, z_bounded, z_range)
         
     data = data_out.copy_to_host()
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
@@ -168,7 +161,12 @@ def lunchBatchGPU(batchSize = 1000,
 #   cols 8,9 are updated only with scattering target
 
 @cuda.jit
-def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detector_params, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,z_bounded, z_range):
+def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, 
+                  source_type, source_param1, source_param2, 
+                  detector_params, 
+                  max_N, max_distance_from_det, 
+                  target_type, target_mask, target_gridsize, z_target, 
+                  z_bounded, z_range):
     
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]

@@ -13,11 +13,14 @@ from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 import sys
 import math
+import threading
 
 #Assumptions:
 # 1. Detector is circular, at 0,0,0 on the x-y plane and points towards the positive z axis
 # 2. Doesn't dupport reflective targets.
 # 3. Support only impulse pencil beam.
+
+#compiler_lock = threading.Lock()
 
 def lunchPacketwithBatch(batchSize = 1000,
                         nPhotonsRequested = 1e6,
@@ -68,13 +71,21 @@ def lunchPacketwithBatch(batchSize = 1000,
     while num_simulated < nPhotonsToRun and num_detected < nPhotonsRequested:
         print('{:.0e}'.format(num_simulated), end="\r")
         
-        ret = GPUWrapper(device_id, batchSize, muS, g, 
+        if device_id == -1: # Run multi GPU version
+            ret = MultiGPUWrapper(batchSize, muS, g, 
+                             source_type, source_param1, source_param2, 
+                             detector_params, 
+                             max_N, max_distance_from_det, 
+                             target_type, target_mask, target_gridsize, 
+                             z_target, z_bounded, z_range, ret_cols)
+        else: # Run on specific GPU (device_id)
+            ret = SingleGPUWrapper(device_id, batchSize, muS, g, 
                          source_type, source_param1, source_param2, 
                          detector_params, 
                          max_N, max_distance_from_det, 
                          target_type, target_mask, target_gridsize, 
                          z_target, z_bounded, z_range, ret_cols)
-        
+            
         # Not valid photons return with n=-1 - so remove them
         num_hit_target_not_detected += np.sum(ret[:,0]==0)
         ret = ret[ret[:, 0]>0, :]
@@ -90,7 +101,58 @@ def lunchPacketwithBatch(batchSize = 1000,
     return data, num_simulated, num_detected, num_hit_target_not_detected
 
 
-def GPUWrapper(device_id, batchSize, muS, g, 
+def SingleGPUWrapper(device_id, batchSize, muS, g, 
+                         source_type, source_param1, source_param2, 
+                         detector_params, 
+                         max_N, max_distance_from_det, 
+                         target_type, target_mask, target_gridsize, 
+                         z_target, z_bounded, z_range, ret_cols):
+    data_out = {}
+    data_out[device_id] = 0
+    GPUWrapper(data_out, device_id, batchSize, muS, g, 
+                         source_type, source_param1, source_param2, 
+                         detector_params, 
+                         max_N, max_distance_from_det, 
+                         target_type, target_mask, target_gridsize, 
+                         z_target, z_bounded, z_range, ret_cols)
+    return data_out[device_id]
+
+
+def MultiGPUWrapper(batchSize, muS, g, 
+                         source_type, source_param1, source_param2, 
+                         detector_params, 
+                         max_N, max_distance_from_det, 
+                         target_type, target_mask, target_gridsize, 
+                         z_target, z_bounded, z_range, ret_cols):
+    data_out = {}
+    children = []
+    n_GPUs = len(cuda.list_devices())
+    batch_per_gpu = np.floor(batchSize / n_GPUs)
+    for device_id, dev in enumerate(cuda.list_devices()):
+        data_out[device_id] = 0
+        t = threading.Thread(target=GPUWrapper, args=(data_out, device_id, batch_per_gpu, muS, g, 
+                                                     source_type, source_param1, source_param2, 
+                                                     detector_params, 
+                                                     max_N, max_distance_from_det, 
+                                                     target_type, target_mask, target_gridsize, 
+                                                     z_target, z_bounded, z_range, ret_cols))
+        t.start()
+        children.append(t)
+
+    for t in children:
+        t.join()
+    
+    data_ret = None
+    for i in range(n_GPUs):
+        if data_ret is None:
+            data_ret = data_out[i]
+        else:
+            data_ret = np.concatenate((data_ret, data_out[i]), axis=0)       
+    
+    return data_ret
+    
+
+def GPUWrapper(data_out, device_id, batchSize, muS, g, 
                          source_type, source_param1, source_param2, 
                          detector_params, 
                          max_N, max_distance_from_det, 
@@ -101,13 +163,25 @@ def GPUWrapper(device_id, batchSize, muS, g,
     blocks = 64
     photons_per_thread = int(np.ceil(float(batchSize)/(threads_per_block * blocks)))
 
-    device = cuda.select_device(device_id)
+    cuda.select_device(device_id)
+    device = cuda.get_current_device()
     stream = cuda.stream()  # use stream to trigger async memory transfer
+    
+    # Keeping this piece of code here for now -potentially we need this in the future
+  #  with compiler_lock:                        # lock the compiler
+        # prepare function for this thread
+        # the jitted CUDA kernel is loaded into the current context
+        # TODO: ideally we should call cuda.jit(signature)(propPhotonGPU), where
+        # signature is the call to the function. So far I couldn't figure out what is the signature of the 
+        # rng_states, closest I got to was: array(Record([('s0', '<u8'), ('s1', '<u8')]), 1d, A)
+        # But I couldn't get it to work yet.
+   #     MC_cuda_kernel = cuda.jit(propPhotonGPU)
+        
     
     data = np.ndarray(shape=(threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
     data_out_device = cuda.device_array_like(data, stream=stream)
     
-    rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=(np.random.randint(sys.maxsize)-128)+device_id)
+    rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=(np.random.randint(sys.maxsize)-128)+device_id, stream=stream)
     
     propPhotonGPU[blocks, threads_per_block](rng_states, data_out_device, photons_per_thread, muS, g, 
                                              source_type, source_param1, source_param2, 
@@ -121,8 +195,7 @@ def GPUWrapper(device_id, batchSize, muS, g,
 
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
     data = data[:, ret_cols]
-
-    return data
+    data_out[device_id] = data
 
 
 

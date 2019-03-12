@@ -32,7 +32,7 @@ def lunchPacketwithBatch(batchSize = 1000,
                         source = {'r': np.array([0.0, 0.0, 0.0]),
                                   'mu': np.array([0.0, 0.0, 1.0]),
                                   'method': 'pencil', 'time_profile': 'delta'},
-                        detector = {'type': 0, 'radius': 10.0, 'z_detector': 10.0},
+                        detector = {'type': 0, 'radius': 10.0, 'z_detector': 10.0, 'det_size': 8.0},
                         control_param = {'max_N': 1e5,
                                          'max_distance_from_det': 1000},
                         normalize_d = None,
@@ -268,8 +268,9 @@ def GPUWrapper(data_out, device_id,
 #   when soruce_type is structured pattern, 0, 1 are x_dim, y_dim of structured light (center of 2D pattern at (0,0))
 #  
 # detector_params:
-#      0,        1,            2,          3, 
-#    Type, Aperture size, focal_length, Radius, 
+#      0,        1,            2,          3,         4,           5,            6,              7 
+#    Type, Aperture size, focal_length, thickness,  Radius, refraction index, z_detector, Detector size(side of square)-only for lens
+#
 #
 #    detector types: 0: bare sensor (only Aperture size is used),  
 #                    1: lens
@@ -430,6 +431,11 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
                         z -= detector_params[6]
                         d += math.sqrt( (alphax * detector_params[6])**2 + (alphay * detector_params[6])**2 + (detector_params[6])**2 )
                         nux, nuy, nuz = 0, 0, 0  # We don't bother recalculating these angles
+                        
+                        # make sure we hit the detector itself, otherwise stop
+                        if (x < -detector_params[7]) or (x > detector_params[7]) or (y < -detector_params[7]) or (y > detector_params[7]):
+                            photons_cnt_stopped += 1
+                            break
                         
                     data_out[thread_id, photons_cnt_detected, 0] = n
                     data_out[thread_id, photons_cnt_detected, 1] = d
@@ -601,8 +607,8 @@ def simSource(source = {'r': np.array([0.0, 0.0, 0.0]),
 
 
 # detector_params:
-#      0,        1,            2,          3, 
-#    Type, Aperture size, focal_length, Radius, 
+#      0,        1,            2,          3,         4,           5,            6,              7 
+#    Type, Aperture size, focal_length, thickness,  Radius, refraction index, z_detector, Detector size(side of square)-only for lens
 #
 #    detector types: 0: bare sensor (only Aperture size is used),  
 #                    1: lens
@@ -629,9 +635,14 @@ def getDetectorParams(detector, target):
             z0 = 10.0
     else:
         z0 = detector['focus_target']
+        
+    if 'det_size' not in detector:
+        det_size = detR
+    else:
+        det_size = detector['det_size']        
     
     if dtype == 0:
-        detector_params = [0, detR, 0, 0, 0, 0, 0]
+        detector_params = [0, detR, 0, 0, 0, 0, 0, 0]
     elif dtype == 1:
         R = 1.05 * detR
         thickness = 1.05 * (R - math.sqrt(R**2 - detR**2))
@@ -653,7 +664,7 @@ def getDetectorParams(detector, target):
         if detR > math.sqrt(2*R*thickness - thickness**2):
             print('Detector Params Error 1')
             return None
-        detector_params = [1, detR, f, thickness, R, n, zd]
+        detector_params = [1, detR, f, thickness, R, n, zd, det_size]
     else:
         print('Undefined detector type')
     

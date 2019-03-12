@@ -13,12 +13,18 @@ from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 import sys
 import math
+import threading
 
 #Assumptions:
 # 1. Detector is circular, at 0,0,0 on the x-y plane and points towards the positive z axis
 # 2. Doesn't dupport reflective targets.
 # 3. Support only impulse pencil beam.
 
+#compiler_lock = threading.Lock()
+
+# Note: batchSize         = max number of photons per device (affected by memory considerations)
+#       nPhotonsRequested = the size of the array asked to be returned - how many photons should be detected
+#       nPhotonsToRun     = the maximum photons to run before giving up
 def lunchPacketwithBatch(batchSize = 1000,
                         nPhotonsRequested = 1e6,
                         nPhotonsToRun = 1e10,
@@ -46,58 +52,6 @@ def lunchPacketwithBatch(batchSize = 1000,
     max_distance_from_det = float(control_param['max_distance_from_det'])
     
     detector_params = getDetectorParams(detector, target)
-    
-    nPhotonsRequested = int(nPhotonsRequested)
-    batchSize = int(batchSize)
-    data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)), dtype=float)
-    
-    num_detected = 0
-    num_simulated = 0
-    num_hit_target_not_detected = 0
-    
-    while num_simulated < nPhotonsToRun and num_detected < nPhotonsRequested:
-        print('{:.0e}'.format(num_simulated), end="\r")
-        ret = lunchBatchGPU(batchSize = batchSize,
-                         muS = muS, g = g,
-                       source = source,
-                       detector_params = detector_params,
-                       max_N = max_N,
-                       max_distance_from_det = max_distance_from_det, ret_cols=ret_cols, target=target,
-                       z_bounded = z_bounded, z_range = z_range, device_id = device_id)
-        # Not valid photons return with n=-1 - so remove them
-        num_hit_target_not_detected += np.sum(ret[:,0]==0)
-        ret = ret[ret[:, 0]>0, :]
-        if ret.shape[0] > nPhotonsRequested - num_detected:
-            ret = ret[:nPhotonsRequested - num_detected, :]
-        data[num_detected : (num_detected+ret.shape[0]), :] = ret
-        num_detected += ret.shape[0]
-        num_simulated += batchSize
-            
-    data = data[:num_detected, :] 
-    if normalize_d is not None:
-        data[:, 1] *= normalize_d
-    return data, num_simulated, num_detected, num_hit_target_not_detected
-
-
-def lunchBatchGPU(batchSize = 1000,
-               muS  =  1.0, g = 0.85,
-               source = {'r': np.array([0.0, 0.0, 0.0]),
-                          'mu': np.array([0.0, 0.0, 1.0]),
-                          'method': 'pencil', 'time_profile': 'delta'},
-               detector_params = [0, 0, 0, 0, 0, 0, 0],
-               max_N = 1e5,
-               max_distance_from_det = 1000.0,
-               ret_cols = [0,1,2,3],
-               target = {'type':0,
-                         'mask':np.zeros(shape=(60,60)),
-                         'grid_size':np.array([1,1]),
-                         'z_target':20},
-               z_bounded = False,
-               z_range = np.array([0.0,30.0]),
-               device_id = 0
-            ):
-    muS = float(muS)
-    g = float(g)
     detector_params = np.array(detector_params).astype(float)
     
     source_type, source_param1, source_param2 = simSource(source = source)
@@ -107,29 +61,187 @@ def lunchBatchGPU(batchSize = 1000,
     target_gridsize = target['grid_size'].astype(float)
     z_target = target['z_target']
     
-    z_range = z_range.astype(float)
+    z_range = z_range.astype(float)     
+    
+    nPhotonsRequested = int(nPhotonsRequested)
+    batchSize = int(batchSize)
+    data = np.ndarray(shape=(nPhotonsRequested, len(ret_cols)), dtype=float)
+    
+    photon_counters = np.zeros(shape=5, dtype=int)
+# photon_counters description:
+#    0: Total simulated photons
+#    1: Detected photons
+#    2: Photons that hit the target and then detected
+#    3: Photons that hit the target
+#    4: Photons that didn't get back to the detector because of some of the stopping criteria    
+        
+    while photon_counters[0] < nPhotonsToRun and photon_counters[1] < nPhotonsRequested:
+        if device_id == -1: # Run multi GPU version
+            ret = MultiGPUWrapper(batchSize, nPhotonsToRun, muS, g, 
+                             source_type, source_param1, source_param2, 
+                             detector_params, 
+                             max_N, max_distance_from_det, 
+                             target_type, target_mask, target_gridsize, 
+                             z_target, z_bounded, z_range, ret_cols)
+        else: # Run on specific GPU (device_id)
+            ret = SingleGPUWrapper(device_id, batchSize, nPhotonsToRun,
+                                   muS, g, 
+                                   source_type, source_param1, source_param2, 
+                                   detector_params, 
+                                   max_N, max_distance_from_det, 
+                                   target_type, target_mask, target_gridsize, 
+                                   z_target, z_bounded, z_range, ret_cols)
+        ret_data = ret[0]
+        # Not valid photons return with n=-1 - so remove them
+        ret_data = ret_data[ret_data[:, 0]>0, :]
+        
+        if ret_data.shape[0] > nPhotonsRequested - photon_counters[1]:
+            ret_data = ret_data[:nPhotonsRequested - photon_counters[1], :]
+        data[photon_counters[1] : (photon_counters[1]+ret_data.shape[0]), :] = ret_data
+
+        photon_counters += ret[1]
+            
+    data = data[:photon_counters[1], :] 
+    if normalize_d is not None:
+        data[:, 1] *= normalize_d
+    return data, photon_counters
+
+
+def SingleGPUWrapper(device_id, photons_requested, max_photons_to_run,
+                     muS, g, 
+                     source_type, source_param1, source_param2, 
+                     detector_params, 
+                     max_N, max_distance_from_det, 
+                     target_type, target_mask, target_gridsize, 
+                     z_target, z_bounded, z_range, ret_cols):
+    data_out = {}
+    data_out[device_id] = [0,0]
+    
+    photons_req_per_device = photons_requested
+    max_photons_per_device = max_photons_to_run
+    
+    GPUWrapper(data_out, device_id,
+               photons_req_per_device, max_photons_per_device,
+               muS, g, 
+               source_type, source_param1, source_param2, 
+               detector_params, 
+               max_N, max_distance_from_det, 
+               target_type, target_mask, target_gridsize, 
+               z_target, z_bounded, z_range, ret_cols)
+    return data_out[device_id]
+
+
+def MultiGPUWrapper(photons_requested, max_photons_to_run,
+                    muS, g, 
+                    source_type, source_param1, source_param2, 
+                    detector_params, 
+                    max_N, max_distance_from_det, 
+                    target_type, target_mask, target_gridsize, 
+                    z_target, z_bounded, z_range, ret_cols):
+    data_out = {}
+    children = []
+    n_GPUs = len(cuda.list_devices())
+    
+    # I've decided to use the photon numbers as is - it means that the requests should be treated
+    # as a per GPU basis. The calling function is reponsible for dividing if neccesary.
+    # photons_req_per_device = np.floor(photons_requested / n_GPUs)
+    # max_photons_per_device = np.floor(max_photons_to_run / n_GPUs)
+    
+    photons_req_per_device = photons_requested
+    max_photons_per_device = max_photons_to_run    
+    
+    for device_id, dev in enumerate(cuda.list_devices()):
+        data_out[device_id] = [0,0]
+        t = threading.Thread(target=GPUWrapper, args=(data_out, device_id, 
+                                                      photons_req_per_device, max_photons_per_device, 
+                                                      muS, g, 
+                                                      source_type, source_param1, source_param2, 
+                                                      detector_params, 
+                                                      max_N, max_distance_from_det, 
+                                                      target_type, target_mask, target_gridsize, 
+                                                      z_target, z_bounded, z_range, ret_cols))
+        t.start()
+        children.append(t)
+
+    for t in children:
+        t.join()
+    
+    data_ret = None
+    for i in range(n_GPUs):
+        if data_ret is None:
+            data_ret = data_out[i][0]
+            photon_counters = data_out[i][1]
+        else:
+            data_ret = np.concatenate((data_ret, data_out[i][0]), axis=0)       
+            photon_counters += data_out[i][1]
+    
+    return [data_ret, photon_counters]
+    
+
+def GPUWrapper(data_out, device_id, 
+               photons_req_per_device, max_photons_per_device,
+               muS, g, 
+               source_type, source_param1, source_param2, 
+               detector_params, 
+               max_N, max_distance_from_det, 
+               target_type, target_mask, target_gridsize, 
+               z_target, z_bounded, z_range, ret_cols):
     
     threads_per_block = 256 
     blocks = 64
-    photons_per_thread = int(np.ceil(float(batchSize)/(threads_per_block * blocks)))
-
-    device = cuda.select_device(device_id)
-    data_out = cuda.device_array((threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
-    rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=np.random.randint(sys.maxsize))
+    photons_per_thread = int(np.ceil(float(photons_req_per_device)/(threads_per_block * blocks)))
+    max_photons_per_thread = int(np.ceil(float(max_photons_per_device)/(threads_per_block * blocks)))
     
-    propPhotonGPU[blocks, threads_per_block](rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detector_params, max_N, max_distance_from_det,target_type,target_mask,target_gridsize,z_target,z_bounded, z_range)
+    cuda.select_device(device_id)
+    device = cuda.get_current_device()
+    stream = cuda.stream()  # use stream to trigger async memory transfer
+    
+    # Keeping this piece of code here for now -potentially we need this in the future
+  #  with compiler_lock:                        # lock the compiler
+        # prepare function for this thread
+        # the jitted CUDA kernel is loaded into the current context
+        # TODO: ideally we should call cuda.jit(signature)(propPhotonGPU), where
+        # signature is the call to the function. So far I couldn't figure out what is the signature of the 
+        # rng_states, closest I got to was: array(Record([('s0', '<u8'), ('s1', '<u8')]), 1d, A)
+        # But I couldn't get it to work yet.
+   #     MC_cuda_kernel = cuda.jit(propPhotonGPU)
         
-    data = data_out.copy_to_host()
+    
+    data = np.ndarray(shape=(threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
+    photon_counters = np.ndarray(shape=(threads_per_block*blocks, 5), dtype=np.int)
+    data_out_device = cuda.device_array_like(data, stream=stream)
+    photon_counters_device = cuda.device_array_like(photon_counters, stream=stream)
+    
+    rng_states = create_xoroshiro128p_states(threads_per_block * blocks, seed=(np.random.randint(sys.maxsize)-128)+device_id, stream=stream)
+    
+    propPhotonGPU[blocks, threads_per_block](rng_states, data_out_device, photon_counters_device,
+                                             photons_per_thread, max_photons_per_thread, muS, g, 
+                                             source_type, source_param1, source_param2, 
+                                             detector_params, 
+                                             max_N, max_distance_from_det, 
+                                             target_type, target_mask, target_gridsize, 
+                                             z_target, z_bounded, z_range)
+    
+    data_out_device.copy_to_host(data, stream=stream)
+    photon_counters_device.copy_to_host(photon_counters, stream=stream)
+    stream.synchronize()
+
     data = data.reshape(data.shape[0]*data.shape[1], data.shape[2])
     data = data[:, ret_cols]
-
-    return data
+    data_out[device_id][0] = data
+    
+    photon_counters_aggr = np.squeeze(np.sum(photon_counters, axis=0))
+    data_out[device_id][1] = photon_counters_aggr
+    
 
 
 
 
 # Input
 # =====
+#  photons_requested: total photons in the detector (max returned in the array) 
+#  max_photons_to_run: maximum of the photons that are allowed to simulate
+#
 #  target_type:
 #         0: not simulated
 #         1: absorbing target
@@ -166,9 +278,22 @@ def lunchBatchGPU(batchSize = 1000,
 #    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10
 #    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  n_target_hit_times
 #   cols 8,9 are updated only with scattering target
+#
+#   photon_counters:
+#    0: Total simulated photons
+#    1: Detected photons
+#    2: Photons that hit the target and then detected
+#    3: Photons that hit the target
+#    4: Photons that didn't get back to the detector because of some of the stopping criteria
 
 @cuda.jit
-def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type, source_param1, source_param2, detector_params, max_N, max_distance_from_det, target_type,target_mask,target_gridsize,z_target,z_bounded, z_range):
+def propPhotonGPU(rng_states, data_out, photon_counters, 
+                  photons_requested, max_photons_to_run, muS, g, 
+                  source_type, source_param1, source_param2, 
+                  detector_params, 
+                  max_N, max_distance_from_det, 
+                  target_type, target_mask, target_gridsize, z_target, 
+                  z_bounded, z_range):
     
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]
@@ -192,10 +317,20 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         rand_y = xoroshiro128p_uniform_float32(rng_states, thread_id)
     if source_type in [4,5]: #if structured pattern
         rand_index = xoroshiro128p_uniform_float32(rng_states, thread_id)
+    
+    
+    photon_cnt_tot = 0          # Total simulated photons
+    photons_cnt_stopped = 0     # Photons that didn't get back to the detector because of some of the stopping criteria
+    photons_cnt_hit_target = 0  # Photons that hit the target
+    photons_cnt_detected = 0    # Detected photons
+    photons_cnt_detected_hit_target = 0  # Photons that hit the target and then detected
+    
+    while photon_cnt_tot < max_photons_to_run and photons_cnt_detected < photons_requested:
+        photon_cnt_tot += 1
+        hit_target_flag = False
         
-    for photon_ind in range(photons_per_thread):
-        data_out[thread_id, photon_ind, :] = -1.0
-        data_out[thread_id, photon_ind, 10] = 0
+        data_out[thread_id, photons_cnt_detected, :] = -1.0
+        data_out[thread_id, photons_cnt_detected, 10] = 0
 
         # Initialize photon based on the illumination type
         if source_type == 0 or source_type ==1 : # Fixed x,y,z (pencil, cone)
@@ -242,14 +377,14 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
         while True:
             # Should we stop
             if n >= max_N:
-                data_out[thread_id, photon_ind, 1:] = -2.0
+                photons_cnt_stopped += 1
                 break
             if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
-                data_out[thread_id, photon_ind, 1:] = -3.0
+                photons_cnt_stopped += 1
                 break    
             if z_bounded:# Check if we are out of tissue (when starting from tissue z boundary)
                 if z > z_max or z < z_min:
-                    data_out[thread_id, photon_ind, 1:] = -6.0
+                    photons_cnt_stopped += 1
                     break
                     
             # Get random numbers    
@@ -274,6 +409,7 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                 t_rz = z + cd * nuz
             
                 if t_rx**2 + t_ry**2 < detR2: # If we hit the aperture
+                    # Photon was detected
                     d+=cd
                     n+=1
                     x,y,z = t_rx, t_ry, t_rz
@@ -295,17 +431,20 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                         d += math.sqrt( (alphax * detector_params[6])**2 + (alphay * detector_params[6])**2 + (detector_params[6])**2 )
                         nux, nuy, nuz = 0, 0, 0  # We don't bother recalculating these angles
                         
-                    data_out[thread_id, photon_ind, 0] = n
-                    data_out[thread_id, photon_ind, 1] = d
-                    data_out[thread_id, photon_ind, 2] = x
-                    data_out[thread_id, photon_ind, 3] = y
-                    data_out[thread_id, photon_ind, 4] = z
-                    data_out[thread_id, photon_ind, 5] = nux
-                    data_out[thread_id, photon_ind, 6] = nuy
-                    data_out[thread_id, photon_ind, 7] = nuz
+                    data_out[thread_id, photons_cnt_detected, 0] = n
+                    data_out[thread_id, photons_cnt_detected, 1] = d
+                    data_out[thread_id, photons_cnt_detected, 2] = x
+                    data_out[thread_id, photons_cnt_detected, 3] = y
+                    data_out[thread_id, photons_cnt_detected, 4] = z
+                    data_out[thread_id, photons_cnt_detected, 5] = nux
+                    data_out[thread_id, photons_cnt_detected, 6] = nuy
+                    data_out[thread_id, photons_cnt_detected, 7] = nuz
+                    photons_cnt_detected += 1
+                    if hit_target_flag:
+                        photons_cnt_detected_hit_target += 1
                     break
                 else:  # If we passed the detector and didn't hit it we should stop
-                    data_out[thread_id, photon_ind, 1:] = -1.0
+                    photons_cnt_stopped += 1
                     break
             
             if target_type > 0: # If target is simulated
@@ -321,17 +460,17 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                     
                     if target_type == 1: # If this is an absorbing target
                         if x_index < 0 or x_index >= target_x_dim or y_index < 0 or y_index >= target_y_dim:
-                            data_out[thread_id, photon_ind, 1:] = -4.0 #photon is out of the bound of target
+                            photons_cnt_stopped += 1 #photon is out of the bound of target
                             break
                         elif target_mask[y_index,x_index] == 0:
-                            data_out[thread_id, photon_ind, 1:] = -5.0 #we are absorbed by target
+                            photons_cnt_stopped += 1 #we are absorbed by target
                             break
                             
                     elif target_type == 2: # If this is a scattering target
                         if x_index >= 0 and x_index < target_x_dim and y_index >= 0 and y_index < target_y_dim:
                             if target_mask[y_index, x_index] > 0:  # 0 is transparent
                                 if z > z_target: # We want to drop photons that hit the target on the backside
-                                    data_out[thread_id, photon_ind, 1:] = -7.0 # Hit target on back side
+                                    photons_cnt_stopped += 1 # Hit target on back side
                                     break
                                     
                                 # Update photon to hit the target
@@ -339,10 +478,14 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                                 n += 1
                                 x, y, z = t_rx_target, t_ry_target, t_rz_target
                                 z-=0.0001 # We want to shift the photon a little bit from the target, otherwise in the next loop it'll hit the target again by definition (z==z_target)
-                                data_out[thread_id, photon_ind, 8] = n
-                                data_out[thread_id, photon_ind, 9] = d
-                                data_out[thread_id, photon_ind, 10] +=1
-                                data_out[thread_id, photon_ind, 0] = 0  # This helps us to record the photon hit the target in case it wasn't detected later
+                                data_out[thread_id, photons_cnt_detected, 8] = n
+                                data_out[thread_id, photons_cnt_detected, 9] = d
+                                data_out[thread_id, photons_cnt_detected, 10] +=1
+                                
+                                if not hit_target_flag:  # Count photons that hit target only once
+                                    photons_cnt_hit_target += 1
+                                hit_target_flag = True
+                                
                                 
                                 # Calculate scattering angle
                                 if target_mask[y_index, x_index] == 1:  # 1 is lambertian reflection
@@ -388,8 +531,15 @@ def propPhotonGPU(rng_states, data_out, photons_per_thread, muS, g, source_type,
                 nux = sqrt_mu*cos_psi
                 nuy = -sqrt_mu*sin_psi
                 nuz = -mu
+                
+    # Update photon counters before completion
+    photon_counters[thread_id, 0] = photon_cnt_tot  
+    photon_counters[thread_id, 1] = photons_cnt_detected                
+    photon_counters[thread_id, 2] = photons_cnt_detected_hit_target                
+    photon_counters[thread_id, 3] = photons_cnt_hit_target  
+    photon_counters[thread_id, 4] = photons_cnt_stopped  
 
-
+    
 
                     
 # returns source_type id, source_param1([x, y, z, nux, nuy, nuz, theta, grid_size (for area source), d, n]), 

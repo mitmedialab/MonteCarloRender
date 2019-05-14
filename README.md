@@ -19,7 +19,7 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
 ### GPU support:
   Supports single or multiple GPUs (user defined).
 
-### Main function call
+## Main function call
   Use the lunchPacketwithBatch() function to run the simulator. See MC.py for documentation.
 
 # Tests

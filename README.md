@@ -22,5 +22,5 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
 ## Main function call
   Use the lunchPacketwithBatch() function to run the simulator. See MC.py for documentation.
 
-# Tests
+## Tests
   The tests.ipynb file provide some basic tests for the code

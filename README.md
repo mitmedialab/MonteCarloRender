@@ -2,6 +2,14 @@
 
 This is a GPU implementation of a Monte Carlo Photon Transport in scattering media
 
+
+## Main function call
+  Use the lunchPacketwithBatch() function to run the simulator. See MC.py for documentation.
+
+## Tests
+  The tests.ipynb file provide some basic tests for the code
+  
+  
 ## Several notes on properties / limitations:
 ### Media:
  Assume homogeneous media. You can provide the scattering mean free path (MFP) and Henyey Greenstein anisotropy coefficient.
@@ -19,8 +27,4 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
 ### GPU support:
   Supports single or multiple GPUs (user defined).
 
-## Main function call
-  Use the lunchPacketwithBatch() function to run the simulator. See MC.py for documentation.
 
-## Tests
-  The tests.ipynb file provide some basic tests for the code

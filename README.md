@@ -5,10 +5,6 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
 
 ## Main function call
   Use the lunchPacketwithBatch() function to run the simulator. See MC.py for documentation.
-
-## Tests
-  The tests.ipynb file provide some basic tests for the code
-  
   
 ## Several notes on properties / limitations:
 ### Media:
@@ -27,4 +23,24 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
 ### GPU support:
   Supports single or multiple GPUs (user defined).
 
-
+## Example:
+    import MC
+    ret = MC.lunchPacketwithBatch(batchSize = 1e7,
+                               nPhotonsRequested = 1e7,
+                                nPhotonsToRun = 1e7,
+                                muS = 1.0, g = 0.85,
+                                source = {'r': np.array([0.0, 0.0, 30.0]),
+                                          'mu': np.array([0.0, 0.0, -1.0]),
+                                          'method': 'pencil', 'time_profile': 'delta'},
+                                detector = {'radius': 100.0},
+                                control_param = {'max_N': 1e5,
+                                                 'max_distance_from_det': 110},
+                                normalize_d = None,
+                                ret_cols = [0,1,2,3,4,5,6,7]
+                                )      
+                                
+  The runtime is approximatley 15 sec on a single Nvidia GTX 1080.
+  ret[0] is the data.
+  ret[1][0] are the number of simulated photons.
+  ret[1][1] are the number of detected photons.
+  etc.

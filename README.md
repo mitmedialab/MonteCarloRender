@@ -11,13 +11,13 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
  Assume homogeneous media. You can provide the scattering mean free path (MFP) and Henyey Greenstein anisotropy coefficient.
 
 ### Detector:
- Assume a single detector.
- Detector is circular (you can provide diameter).
- Detector is centered at the origin.
+ Assume a single detector. <br/>
+ Detector is circular (you can provide diameter). <br/>
+ Detector is centered at the origin. <br/>
  Detector is parallel to the x-y plane and points at the positive z direction.
 
 ### Targets:
- Supports a 2d target that is positioned at a given x-y plane (user provides the z coordinate).
+ Supports a 2d target that is positioned at a given x-y plane (user provides the z coordinate). <br/>
  The mask can be absorbing (binary value), or scattering (reflective).
  
 ### GPU support:
@@ -39,8 +39,8 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
                                 ret_cols = [0,1,2,3,4,5,6,7]
                                 )      
                                 
-  The runtime is approximatley 15 sec on a single Nvidia GTX 1080.
-  ret[0] is the data.
-  ret[1][0] are the number of simulated photons.
-  ret[1][1] are the number of detected photons.
+  The runtime is approximatley 15 sec on a single Nvidia GTX 1080. <br/>
+  ret[0] is the data. <br/>
+  ret[1][0] are the number of simulated photons.<br/>
+  ret[1][1] are the number of detected photons.<br/>
   etc.
